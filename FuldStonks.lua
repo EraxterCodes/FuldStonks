@@ -17,7 +17,7 @@ local COLOR_GREEN = "|cFF00FF00"
 local COLOR_RESET = "|r"
 local COLOR_YELLOW = "|cFFFFFF00"
 local COLOR_RED = "|cFFFF0000"
-local BET_HOLDER = "Flyvflyvspyt-Kazzak"  -- Player who holds the gold for bets
+local COLOR_ORANGE = "|cFFFF8800"
 
 -- Addon state
 FuldStonks.version = "0.1.0"
@@ -177,17 +177,50 @@ local function CreateMainFrame()
                 info:SetText("By: " .. creatorName .. " • Type: " .. bet.betType .. " • Pot: " .. bet.totalPot .. "g")
                 info:SetTextColor(0.7, 0.7, 0.7)
                 
-                -- Bet buttons for each option
-                local buttonOffset = 0
-                for _, option in ipairs(bet.options) do
-                    local optionButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
-                    optionButton:SetSize(80, 22)
-                    optionButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
-                    optionButton:SetText(option)
-                    optionButton:SetScript("OnClick", function()
-                        FuldStonks:ShowPlaceBetDialog(betId, option)
+                -- Check if player has a pending bet on this
+                local hasPending = FuldStonks.pendingBets[playerFullName] and FuldStonks.pendingBets[playerFullName].betId == betId
+                
+                if hasPending then
+                    -- Show pending status
+                    local pendingText = betFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                    pendingText:SetPoint("TOPLEFT", info, "BOTTOMLEFT", 0, -3)
+                    local pendingBet = FuldStonks.pendingBets[playerFullName]
+                    pendingText:SetText(COLOR_ORANGE .. "⏳ PENDING: " .. pendingBet.option .. " (" .. pendingBet.amount .. "g) - Awaiting trade" .. COLOR_RESET)
+                    pendingText:SetTextColor(1, 0.5, 0)
+                    
+                    -- Add cancel button
+                    local cancelButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                    cancelButton:SetSize(80, 22)
+                    cancelButton:SetPoint("TOPLEFT", pendingText, "BOTTOMLEFT", 0, -5)
+                    cancelButton:SetText("Cancel")
+                    cancelButton:SetScript("OnClick", function()
+                        FuldStonks:CancelPendingBet()
+                        self:UpdateBetList()
                     end)
-                    buttonOffset = buttonOffset + 85
+                else
+                    -- Bet buttons for each option
+                    local buttonOffset = 0
+                    for _, option in ipairs(bet.options) do
+                        local optionButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                        optionButton:SetSize(80, 22)
+                        optionButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
+                        optionButton:SetText(option)
+                        optionButton:SetScript("OnClick", function()
+                            FuldStonks:ShowPlaceBetDialog(betId, option)
+                        end)
+                        buttonOffset = buttonOffset + 85
+                    end
+                    
+                    -- Show resolve button if we created this bet
+                    if bet.createdBy == playerFullName then
+                        local resolveButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                        resolveButton:SetSize(80, 22)
+                        resolveButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
+                        resolveButton:SetText("Resolve")
+                        resolveButton:SetScript("OnClick", function()
+                            FuldStonks:ShowBetResolutionDialog(betId)
+                        end)
+                    end
                 end
                 
                 yOffset = yOffset + 85
@@ -438,6 +471,194 @@ function FuldStonks:ShowPlaceBetDialog(betId, option)
     end
 end
 
+-- Show bet resolution dialog
+function FuldStonks:ShowBetResolutionDialog(betId)
+    betId = betId or self.selectedBetForResolution
+    
+    if not betId then
+        -- If no betId provided, show selection dialog
+        self:ShowBetSelectionDialog()
+        return
+    end
+    
+    local bet = FuldStonksDB.activeBets[betId]
+    if not bet then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Bet not found!")
+        return
+    end
+    
+    -- Only bet creator can resolve
+    if bet.createdBy ~= playerFullName then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Only the bet creator can resolve this bet!")
+        return
+    end
+    
+    -- Create dialog if it doesn't exist
+    if not self.resolutionDialog then
+        local dialog = CreateFrame("Frame", "FuldStonksResolutionDialog", UIParent, "BasicFrameTemplateWithInset")
+        dialog:SetSize(450, 400)
+        dialog:SetPoint("CENTER")
+        dialog:SetMovable(true)
+        dialog:EnableMouse(true)
+        dialog:RegisterForDrag("LeftButton")
+        dialog:SetScript("OnDragStart", dialog.StartMoving)
+        dialog:SetScript("OnDragStop", dialog.StopMovingOrSizing)
+        dialog:SetFrameStrata("DIALOG")
+        dialog:Hide()
+        
+        dialog.title = dialog:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        dialog.title:SetPoint("TOP", dialog.TitleBg, "TOP", 0, -3)
+        dialog.title:SetText("Resolve Bet")
+        
+        dialog.betTitle = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.betTitle:SetPoint("TOP", dialog, "TOP", 0, -35)
+        dialog.betTitle:SetWidth(420)
+        dialog.betTitle:SetJustifyH("CENTER")
+        
+        dialog.infoLabel = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.infoLabel:SetPoint("TOPLEFT", dialog, "TOPLEFT", 20, -70)
+        dialog.infoLabel:SetText("Select winning option:")
+        
+        -- Scrollable payout info
+        dialog.scrollFrame = CreateFrame("ScrollFrame", nil, dialog, "UIPanelScrollFrameTemplate")
+        dialog.scrollFrame:SetPoint("TOPLEFT", dialog.infoLabel, "BOTTOMLEFT", 0, -10)
+        dialog.scrollFrame:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -30, 80)
+        
+        dialog.scrollContent = CreateFrame("Frame", nil, dialog.scrollFrame)
+        dialog.scrollContent:SetSize(390, 1)
+        dialog.scrollFrame:SetScrollChild(dialog.scrollContent)
+        
+        dialog.payoutText = dialog.scrollContent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        dialog.payoutText:SetPoint("TOPLEFT", dialog.scrollContent, "TOPLEFT", 0, 0)
+        dialog.payoutText:SetWidth(390)
+        dialog.payoutText:SetJustifyH("LEFT")
+        
+        dialog.CloseButton:SetScript("OnClick", function()
+            dialog:Hide()
+        end)
+        
+        self.resolutionDialog = dialog
+    end
+    
+    -- Set bet info
+    self.resolutionDialog.betTitle:SetText(COLOR_YELLOW .. bet.title .. COLOR_RESET)
+    self.resolutionDialog.currentBetId = betId
+    
+    -- Calculate and show payout information
+    local payoutInfo = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. "\n\n"
+    
+    -- Group participants by option
+    local optionGroups = {}
+    for playerName, participation in pairs(bet.participants) do
+        if not optionGroups[participation.option] then
+            optionGroups[participation.option] = {}
+        end
+        table.insert(optionGroups[participation.option], {name = playerName, amount = participation.amount})
+    end
+    
+    -- Show breakdown for each option
+    for _, option in ipairs(bet.options) do
+        local group = optionGroups[option] or {}
+        local totalBets = 0
+        for _, p in ipairs(group) do
+            totalBets = totalBets + p.amount
+        end
+        
+        payoutInfo = payoutInfo .. COLOR_YELLOW .. option .. ":" .. COLOR_RESET .. " " .. #group .. " bets, " .. totalBets .. "g total\n"
+        
+        if #group > 0 then
+            for _, p in ipairs(group) do
+                local baseName = GetPlayerBaseName(p.name)
+                local payout = math.floor((p.amount / totalBets) * bet.totalPot)
+                local profit = payout - p.amount
+                payoutInfo = payoutInfo .. "  " .. baseName .. ": " .. p.amount .. "g bet → " .. payout .. "g payout ("
+                if profit > 0 then
+                    payoutInfo = payoutInfo .. COLOR_GREEN .. "+" .. profit .. "g" .. COLOR_RESET
+                elseif profit < 0 then
+                    payoutInfo = payoutInfo .. COLOR_RED .. profit .. "g" .. COLOR_RESET
+                else
+                    payoutInfo = payoutInfo .. "0g"
+                end
+                payoutInfo = payoutInfo .. ")\n"
+            end
+        else
+            payoutInfo = payoutInfo .. "  No bets\n"
+        end
+        payoutInfo = payoutInfo .. "\n"
+    end
+    
+    self.resolutionDialog.payoutText:SetText(payoutInfo)
+    
+    -- Update scroll content height
+    local textHeight = self.resolutionDialog.payoutText:GetStringHeight()
+    self.resolutionDialog.scrollContent:SetHeight(math.max(textHeight + 20, 200))
+    
+    -- Clear old option buttons
+    if self.resolutionDialog.optionButtons then
+        for _, btn in ipairs(self.resolutionDialog.optionButtons) do
+            btn:Hide()
+            btn:SetParent(nil)
+        end
+    end
+    self.resolutionDialog.optionButtons = {}
+    
+    -- Create option buttons
+    local buttonOffset = 0
+    for _, option in ipairs(bet.options) do
+        local optionButton = CreateFrame("Button", nil, self.resolutionDialog, "UIPanelButtonTemplate")
+        optionButton:SetSize(100, 25)
+        optionButton:SetPoint("BOTTOMLEFT", self.resolutionDialog, "BOTTOMLEFT", 20 + buttonOffset, 15)
+        optionButton:SetText(option .. " Wins")
+        optionButton:SetScript("OnClick", function()
+            FuldStonks:ResolveBet(betId, option)
+            self.resolutionDialog:Hide()
+        end)
+        table.insert(self.resolutionDialog.optionButtons, optionButton)
+        buttonOffset = buttonOffset + 110
+    end
+    
+    -- Cancel button
+    local cancelButton = CreateFrame("Button", nil, self.resolutionDialog, "UIPanelButtonTemplate")
+    cancelButton:SetSize(100, 25)
+    cancelButton:SetPoint("BOTTOMRIGHT", self.resolutionDialog, "BOTTOMRIGHT", -20, 15)
+    cancelButton:SetText("Cancel")
+    cancelButton:SetScript("OnClick", function()
+        self.resolutionDialog:Hide()
+    end)
+    table.insert(self.resolutionDialog.optionButtons, cancelButton)
+    
+    self.resolutionDialog:Show()
+end
+
+-- Show bet selection dialog for resolution
+function FuldStonks:ShowBetSelectionDialog()
+    -- Find bets created by this player
+    local myBets = {}
+    for betId, bet in pairs(FuldStonksDB.activeBets) do
+        if bet.createdBy == playerFullName and bet.status == "active" then
+            table.insert(myBets, {id = betId, title = bet.title})
+        end
+    end
+    
+    if #myBets == 0 then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " You have no active bets to resolve.")
+        return
+    end
+    
+    if #myBets == 1 then
+        -- Only one bet, show resolution dialog directly
+        self:ShowBetResolutionDialog(myBets[1].id)
+        return
+    end
+    
+    -- Multiple bets, let user choose
+    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Select a bet to resolve:")
+    for i, bet in ipairs(myBets) do
+        print("  " .. i .. ". " .. bet.title)
+    end
+    print("Use: /fs resolve (from UI click Resolve button on the specific bet)")
+end
+
 -- Slash command handler
 local function SlashCommandHandler(msg)
     local command = strtrim(msg:lower())
@@ -451,7 +672,9 @@ local function SlashCommandHandler(msg)
         print("  /FuldStonks peers - Show connected peers")
         print("  /FuldStonks debug - Toggle debug mode")
         print("  /FuldStonks create - Create a new bet")
-        print("  /FuldStonks pending - Show pending bets (bet holder only)")
+        print("  /FuldStonks pending - Show pending bets (bet creator only)")
+        print("  /FuldStonks cancel - Cancel your pending bet")
+        print("  /FuldStonks resolve - Resolve a bet you created")
     elseif command == "version" then
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " version " .. FuldStonks.version)
     elseif command == "sync" then
@@ -475,8 +698,14 @@ local function SlashCommandHandler(msg)
     elseif command == "create" then
         -- Show bet creation dialog
         FuldStonks:ShowBetCreationDialog()
+    elseif command == "cancel" then
+        -- Cancel pending bet
+        FuldStonks:CancelPendingBet()
+    elseif command == "resolve" then
+        -- Show bet resolution dialog
+        FuldStonks:ShowBetResolutionDialog()
     elseif command == "pending" then
-        -- Show pending bets (bet holder only)
+        -- Show pending bets (bet creator only)
         local count = 0
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Pending bets awaiting trade:")
         for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
@@ -842,11 +1071,12 @@ local function OnTradeShow()
     FuldStonks.currentTrade.amount = 0
     FuldStonks.currentTrade.betInfo = nil
     
-    -- If this player is the bet holder, check for pending trades
-    if playerFullName == BET_HOLDER then
-        -- Look for pending bet from this player
-        for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
-            if playerName == tradeFullName then
+    -- Check if someone is trading us for a bet we created
+    for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
+        if playerName == tradeFullName then
+            local bet = FuldStonksDB.activeBets[pendingBet.betId]
+            -- Only accept trades if we are the bet creator
+            if bet and bet.createdBy == playerFullName then
                 FuldStonks.currentTrade.betInfo = pendingBet
                 DebugPrint("Trade opened with " .. tradeName .. " who has pending bet for " .. pendingBet.amount .. "g")
                 break
@@ -863,13 +1093,16 @@ local function OnTradeMoneyChanged()
     -- Track the amount being received
     FuldStonks.currentTrade.amount = math.floor(targetGold / 10000)  -- Convert copper to gold
     
-    if playerFullName == BET_HOLDER and FuldStonks.currentTrade.betInfo then
-        local expected = FuldStonks.currentTrade.betInfo.amount
-        if FuldStonks.currentTrade.amount == expected then
-            local traderName = GetPlayerBaseName(FuldStonks.currentTrade.player)
-            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. traderName .. " is trading correct amount: " .. expected .. "g")
-        elseif FuldStonks.currentTrade.amount > 0 then
-            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Warning: Expected " .. expected .. "g but receiving " .. FuldStonks.currentTrade.amount .. "g")
+    if FuldStonks.currentTrade.betInfo then
+        local bet = FuldStonksDB.activeBets[FuldStonks.currentTrade.betInfo.betId]
+        if bet and bet.createdBy == playerFullName then
+            local expected = FuldStonks.currentTrade.betInfo.amount
+            if FuldStonks.currentTrade.amount == expected then
+                local traderName = GetPlayerBaseName(FuldStonks.currentTrade.player)
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. traderName .. " is trading correct amount: " .. expected .. "g")
+            elseif FuldStonks.currentTrade.amount > 0 then
+                print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Warning: Expected " .. expected .. "g but receiving " .. FuldStonks.currentTrade.amount .. "g")
+            end
         end
     end
 end
@@ -878,17 +1111,21 @@ end
 local function OnTradeAcceptUpdate(player, target)
     if player == 1 and target == 1 then
         -- Trade is complete
-        if playerFullName == BET_HOLDER and FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
+        if FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
             local pendingBet = FuldStonks.currentTrade.betInfo
             local traderName = FuldStonks.currentTrade.player
+            local bet = FuldStonksDB.activeBets[pendingBet.betId]
             
-            -- Confirm the bet
-            C_Timer.After(0.5, function()
-                FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
-                
-                -- Remove from pending
-                FuldStonks.pendingBets[traderName] = nil
-            end)
+            -- Only confirm if we are the bet creator
+            if bet and bet.createdBy == playerFullName then
+                -- Confirm the bet
+                C_Timer.After(0.5, function()
+                    FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
+                    
+                    -- Remove from pending
+                    FuldStonks.pendingBets[traderName] = nil
+                end)
+            end
         end
     end
 end
@@ -990,16 +1227,36 @@ function FuldStonks:PlaceBet(betId, option, amount)
         timestamp = GetTime()
     }
     
-    -- Whisper the bet holder to initiate trade
+    -- Whisper the bet creator to initiate trade
     local betTitle = bet.title
+    local betCreator = bet.createdBy
     local whisperMsg = string.format("FuldStonks: Trading you %dg for '%s' (betting %s)", amount, betTitle, option)
-    SendChatMessage(whisperMsg, "WHISPER", nil, BET_HOLDER)
+    SendChatMessage(whisperMsg, "WHISPER", nil, betCreator)
     
-    print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Please trade " .. amount .. "g to " .. GetPlayerBaseName(BET_HOLDER) .. " to confirm your bet.")
+    print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Please trade " .. amount .. "g to " .. GetPlayerBaseName(betCreator) .. " to confirm your bet.")
     print("  Bet: " .. betTitle)
     print("  Choice: " .. COLOR_YELLOW .. option .. COLOR_RESET)
+    print("  " .. COLOR_ORANGE .. "Type /fs cancel to cancel this pending bet" .. COLOR_RESET)
     
     DebugPrint("Pending bet: " .. betId .. " | " .. option .. " | " .. amount .. "g - awaiting trade")
+end
+
+-- Cancel a pending bet
+function FuldStonks:CancelPendingBet()
+    local pendingBet = self.pendingBets[playerFullName]
+    if not pendingBet then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " You have no pending bets to cancel.")
+        return
+    end
+    
+    local bet = FuldStonksDB.activeBets[pendingBet.betId]
+    if bet then
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Cancelled pending bet: " .. bet.title)
+        print("  Choice: " .. COLOR_YELLOW .. pendingBet.option .. COLOR_RESET .. " (" .. pendingBet.amount .. "g)")
+    end
+    
+    self.pendingBets[playerFullName] = nil
+    DebugPrint("Cancelled pending bet")
 end
 
 -- Confirm bet after gold trade (called by bet holder)
