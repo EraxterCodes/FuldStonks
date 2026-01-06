@@ -1191,33 +1191,48 @@ local function OnTradeMoneyChanged()
     end
 end
 
--- Handle trade completion
+-- Handle trade accept button updates
 local function OnTradeAcceptUpdate(player, target)
+    DebugPrint("Trade accept update: player=" .. player .. ", target=" .. target)
     if player == 1 and target == 1 then
-        -- Both players accepted the trade
-        if FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
-            local pendingBet = FuldStonks.currentTrade.betInfo
-            local traderName = FuldStonks.currentTrade.traderName or FuldStonks.currentTrade.player
-            local bet = FuldStonksDB.activeBets[pendingBet.betId]
-            
-            DebugPrint("Trade accepted by both parties. Amount: " .. FuldStonks.currentTrade.amount .. "g")
-            
-            -- Only confirm if we are the bet creator
-            if bet and bet.createdBy == playerFullName then
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade completing...")
+        DebugPrint("Both players have accepted the trade")
+    end
+end
+
+-- Handle trade completion (when trade actually finishes successfully)
+local function OnTradeFinished()
+    DebugPrint("Trade finished successfully")
+    
+    if FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
+        local pendingBet = FuldStonks.currentTrade.betInfo
+        local traderName = FuldStonks.currentTrade.traderName or FuldStonks.currentTrade.player
+        local bet = FuldStonksDB.activeBets[pendingBet.betId]
+        
+        -- Only confirm if we are the bet creator and received the correct amount
+        if bet and bet.createdBy == playerFullName then
+            if FuldStonks.currentTrade.amount == pendingBet.amount then
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade completed successfully! Confirming bet...")
                 
-                -- Confirm the bet after a short delay (to ensure trade completes)
-                C_Timer.After(0.5, function()
-                    FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
-                    
-                    -- Remove from pending
-                    FuldStonks.pendingBets[traderName] = nil
-                    
-                    DebugPrint("Removed pending bet for " .. traderName)
-                end)
+                -- Confirm the bet
+                FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
+                
+                -- Remove from pending
+                FuldStonks.pendingBets[traderName] = nil
+                
+                DebugPrint("Removed pending bet for " .. traderName)
+            else
+                print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Trade amount mismatch! Expected " .. pendingBet.amount .. "g but received " .. FuldStonks.currentTrade.amount .. "g")
             end
         end
     end
+    
+    -- Clear trade info
+    FuldStonks.currentTrade = {
+        player = nil,
+        amount = 0,
+        betInfo = nil,
+        traderName = nil
+    }
 end
 
 -- Event handler
@@ -1275,6 +1290,8 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         OnTradeMoneyChanged()
     elseif event == "TRADE_ACCEPT_UPDATE" then
         OnTradeAcceptUpdate(...)
+    elseif event == "TRADE_FINISHED" then
+        OnTradeFinished()
     end
 end)
 
@@ -1287,6 +1304,7 @@ eventFrame:RegisterEvent("PLAYER_LOGOUT")
 eventFrame:RegisterEvent("TRADE_SHOW")
 eventFrame:RegisterEvent("TRADE_MONEY_CHANGED")
 eventFrame:RegisterEvent("TRADE_ACCEPT_UPDATE")
+eventFrame:RegisterEvent("TRADE_FINISHED")
 
 -- ============================================
 -- FUTURE EXPANSION HOOKS
