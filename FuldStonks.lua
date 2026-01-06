@@ -880,6 +880,7 @@ local MSG_SYNC_RESPONSE = "SYNCRSP" -- Response with full state
 local MSG_BET_CREATED = "BETCRT"    -- New bet created
 local MSG_BET_PLACED = "BETPLC"     -- Bet placement
 local MSG_BET_RESOLVED = "BETRSV"   -- Bet resolved
+local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator)
 
 -- Determine the best channel to send messages
 local function GetBroadcastChannel()
@@ -1114,6 +1115,34 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
             end
         end
         
+    elseif msgType == MSG_BET_PENDING then
+        -- Handle pending bet notification (received by bet creator)
+        local betId = arg1
+        local option = arg2
+        local amount = tonumber(arg3) or 0
+        
+        DebugPrint("Received pending bet notification from " .. sender .. ": " .. betId .. " | " .. option .. " | " .. amount .. "g")
+        
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet and bet.createdBy == playerFullName then
+            -- Store pending bet info from this player
+            FuldStonks.pendingBets[sender] = {
+                betId = betId,
+                option = option,
+                amount = amount,
+                timestamp = GetTime()
+            }
+            
+            local baseName = GetPlayerBaseName(sender)
+            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " wants to bet " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET)
+            print("  Bet: " .. bet.title)
+            print("  " .. COLOR_YELLOW .. "Accept their trade to confirm the bet" .. COLOR_RESET)
+            
+            DebugPrint("Stored pending bet for " .. sender)
+        else
+            DebugPrint("Bet not found or I'm not the creator, ignoring pending bet notification")
+        end
+        
     else
         DebugPrint("Unknown message type: " .. tostring(msgType))
     end
@@ -1149,9 +1178,39 @@ local function OnTradeShow()
     DebugPrint("Trade window opened with: " .. tradeFullName)
     DebugPrint("Current gold: " .. FuldStonks.currentTrade.goldBefore .. "g")
     
-    -- Check if someone is trading us for a bet we created
-    -- Try both full name and base name for same-realm compatibility
-    DebugPrint("Checking pending bets for trader: " .. tradeFullName)
+    -- SCENARIO 1: Check if YOU have a pending bet and are trading TO the bet creator
+    DebugPrint("Checking if I have a pending bet to trade with: " .. tradeFullName)
+    local myPendingBet = FuldStonks.pendingBets[playerFullName]
+    if myPendingBet then
+        DebugPrint("  I have a pending bet for betId: " .. myPendingBet.betId)
+        local bet = FuldStonksDB.activeBets[myPendingBet.betId]
+        if bet then
+            DebugPrint("  Bet found. Creator: " .. bet.createdBy)
+            local betCreatorBaseName = GetPlayerBaseName(bet.createdBy)
+            local tradeBaseName = GetPlayerBaseName(tradeFullName)
+            
+            -- Check if the person we're trading with is the bet creator
+            if bet.createdBy == tradeFullName or betCreatorBaseName == tradeBaseName then
+                DebugPrint("  Trading with bet creator! Setting up trade confirmation.")
+                FuldStonks.currentTrade.betInfo = myPendingBet
+                FuldStonks.currentTrade.traderName = playerFullName  -- I am the trader
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trading gold for your bet:")
+                print("  Bet: " .. bet.title)
+                print("  Amount: " .. myPendingBet.amount .. "g")
+                print("  Option: " .. myPendingBet.option)
+                return
+            else
+                DebugPrint("  Creator doesn't match trader: '" .. bet.createdBy .. "' vs '" .. tradeFullName .. "'")
+            end
+        else
+            DebugPrint("  Bet not found in activeBets")
+        end
+    else
+        DebugPrint("  I don't have a pending bet")
+    end
+    
+    -- SCENARIO 2: Check if someone is trading TO YOU for a bet you created
+    DebugPrint("Checking if trader has pending bet with me (bet creator)")
     local foundMatch = false
     for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
         DebugPrint("  Pending bet from: " .. playerName .. " for betId: " .. pendingBet.betId)
@@ -1168,7 +1227,7 @@ local function OnTradeShow()
                 if bet.createdBy == playerFullName then
                     FuldStonks.currentTrade.betInfo = pendingBet
                     FuldStonks.currentTrade.traderName = playerName  -- Store the actual key used in pendingBets
-                    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade detected for pending bet:")
+                    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Receiving gold for bet:")
                     print("  Bet: " .. bet.title)
                     print("  Expected: " .. pendingBet.amount .. "g")
                     DebugPrint("Trade opened with " .. tradeBaseName .. " who has pending bet for " .. pendingBet.amount .. "g")
@@ -1417,9 +1476,17 @@ function FuldStonks:PlaceBet(betId, option, amount)
         timestamp = GetTime()
     }
     
-    -- Whisper the bet creator to initiate trade
+    -- Broadcast pending bet notification to bet creator via whisper addon message
+    -- This allows the bet creator to know about the pending trade
     local betTitle = bet.title
     local betCreator = bet.createdBy
+    
+    -- Send addon message to bet creator with pending bet info
+    local pendingMsg = betId .. DELIMITER .. option .. DELIMITER .. tostring(amount)
+    DebugPrint("Sending pending bet notification to " .. betCreator .. ": " .. pendingMsg)
+    C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, MSG_BET_PENDING .. DELIMITER .. pendingMsg, "WHISPER", betCreator)
+    
+    -- Also send regular whisper for visibility
     local whisperMsg = string.format("FuldStonks: Trading you %dg for '%s' (betting %s)", amount, betTitle, option)
     SendChatMessage(whisperMsg, "WHISPER", nil, betCreator)
     
