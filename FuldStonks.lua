@@ -683,7 +683,7 @@ function FuldStonks:ShowBetInspectDialog(betId)
     -- Create dialog if it doesn't exist
     if not self.inspectDialog then
         local dialog = CreateFrame("Frame", "FuldStonksInspectDialog", UIParent, "BasicFrameTemplateWithInset")
-        dialog:SetSize(450, 400)
+        dialog:SetSize(600, 500)
         dialog:SetPoint("CENTER")
         dialog:SetMovable(true)
         dialog:EnableMouse(true)
@@ -697,25 +697,86 @@ function FuldStonks:ShowBetInspectDialog(betId)
         dialog.title:SetPoint("TOP", dialog.TitleBg, "TOP", 0, -3)
         dialog.title:SetText("Inspect Bet")
         
-        dialog.betTitle = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.betTitle = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         dialog.betTitle:SetPoint("TOP", dialog, "TOP", 0, -35)
-        dialog.betTitle:SetWidth(420)
+        dialog.betTitle:SetWidth(560)
         dialog.betTitle:SetJustifyH("CENTER")
         
-        -- Scrollable participant list
-        dialog.scrollFrame = CreateFrame("ScrollFrame", nil, dialog, "UIPanelScrollFrameTemplate")
-        dialog.scrollFrame:SetPoint("TOPLEFT", dialog, "TOPLEFT", 20, -70)
-        dialog.scrollFrame:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -30, 50)
+        -- Info section
+        dialog.infoText = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.infoText:SetPoint("TOP", dialog.betTitle, "BOTTOM", 0, -10)
+        dialog.infoText:SetWidth(560)
+        dialog.infoText:SetJustifyH("CENTER")
         
-        dialog.scrollContent = CreateFrame("Frame", nil, dialog.scrollFrame)
-        dialog.scrollContent:SetSize(390, 1)
-        dialog.scrollFrame:SetScrollChild(dialog.scrollContent)
+        -- Top row: 2 columns (Yes and No)
+        -- Left column (Yes - Green)
+        dialog.yesFrame = CreateFrame("Frame", nil, dialog, "InsetFrameTemplate")
+        dialog.yesFrame:SetPoint("TOPLEFT", dialog.infoText, "BOTTOMLEFT", 10, -10)
+        dialog.yesFrame:SetSize(270, 180)
         
-        dialog.participantsText = dialog.scrollContent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dialog.participantsText:SetPoint("TOPLEFT", dialog.scrollContent, "TOPLEFT", 0, 0)
-        dialog.participantsText:SetWidth(390)
-        dialog.participantsText:SetJustifyH("LEFT")
+        dialog.yesTitle = dialog.yesFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        dialog.yesTitle:SetPoint("TOP", dialog.yesFrame, "TOP", 0, -8)
+        dialog.yesTitle:SetText(COLOR_GREEN .. "YES" .. COLOR_RESET)
         
+        dialog.yesScroll = CreateFrame("ScrollFrame", nil, dialog.yesFrame, "UIPanelScrollFrameTemplate")
+        dialog.yesScroll:SetPoint("TOPLEFT", dialog.yesFrame, "TOPLEFT", 8, -30)
+        dialog.yesScroll:SetPoint("BOTTOMRIGHT", dialog.yesFrame, "BOTTOMRIGHT", -28, 8)
+        
+        dialog.yesContent = CreateFrame("Frame", nil, dialog.yesScroll)
+        dialog.yesContent:SetSize(230, 1)
+        dialog.yesScroll:SetScrollChild(dialog.yesContent)
+        
+        dialog.yesText = dialog.yesContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.yesText:SetPoint("TOPLEFT", dialog.yesContent, "TOPLEFT", 0, 0)
+        dialog.yesText:SetWidth(230)
+        dialog.yesText:SetJustifyH("LEFT")
+        
+        -- Right column (No - Red)
+        dialog.noFrame = CreateFrame("Frame", nil, dialog, "InsetFrameTemplate")
+        dialog.noFrame:SetPoint("TOPRIGHT", dialog.infoText, "BOTTOMRIGHT", -10, -10)
+        dialog.noFrame:SetSize(270, 180)
+        
+        dialog.noTitle = dialog.noFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        dialog.noTitle:SetPoint("TOP", dialog.noFrame, "TOP", 0, -8)
+        dialog.noTitle:SetText(COLOR_RED .. "NO" .. COLOR_RESET)
+        
+        dialog.noScroll = CreateFrame("ScrollFrame", nil, dialog.noFrame, "UIPanelScrollFrameTemplate")
+        dialog.noScroll:SetPoint("TOPLEFT", dialog.noFrame, "TOPLEFT", 8, -30)
+        dialog.noScroll:SetPoint("BOTTOMRIGHT", dialog.noFrame, "BOTTOMRIGHT", -28, 8)
+        
+        dialog.noContent = CreateFrame("Frame", nil, dialog.noScroll)
+        dialog.noContent:SetSize(230, 1)
+        dialog.noScroll:SetScrollChild(dialog.noContent)
+        
+        dialog.noText = dialog.noContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.noText:SetPoint("TOPLEFT", dialog.noContent, "TOPLEFT", 0, 0)
+        dialog.noText:SetWidth(230)
+        dialog.noText:SetJustifyH("LEFT")
+        
+        -- Bottom row: Full width (Pending Bets)
+        dialog.pendingFrame = CreateFrame("Frame", nil, dialog, "InsetFrameTemplate")
+        dialog.pendingFrame:SetPoint("TOPLEFT", dialog.yesFrame, "BOTTOMLEFT", 0, -10)
+        dialog.pendingFrame:SetPoint("TOPRIGHT", dialog.noFrame, "BOTTOMRIGHT", 0, -10)
+        dialog.pendingFrame:SetHeight(150)
+        
+        dialog.pendingTitle = dialog.pendingFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        dialog.pendingTitle:SetPoint("TOP", dialog.pendingFrame, "TOP", 0, -8)
+        dialog.pendingTitle:SetText(COLOR_ORANGE .. "PENDING BETS" .. COLOR_RESET)
+        
+        dialog.pendingScroll = CreateFrame("ScrollFrame", nil, dialog.pendingFrame, "UIPanelScrollFrameTemplate")
+        dialog.pendingScroll:SetPoint("TOPLEFT", dialog.pendingFrame, "TOPLEFT", 8, -30)
+        dialog.pendingScroll:SetPoint("BOTTOMRIGHT", dialog.pendingFrame, "BOTTOMRIGHT", -28, 8)
+        
+        dialog.pendingContent = CreateFrame("Frame", nil, dialog.pendingScroll)
+        dialog.pendingContent:SetSize(540, 1)
+        dialog.pendingScroll:SetScrollChild(dialog.pendingContent)
+        
+        dialog.pendingText = dialog.pendingContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.pendingText:SetPoint("TOPLEFT", dialog.pendingContent, "TOPLEFT", 0, 0)
+        dialog.pendingText:SetWidth(540)
+        dialog.pendingText:SetJustifyH("LEFT")
+        
+        -- Close button
         dialog.closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
         dialog.closeButton:SetSize(100, 25)
         dialog.closeButton:SetPoint("BOTTOM", dialog, "BOTTOM", 0, 15)
@@ -734,9 +795,8 @@ function FuldStonks:ShowBetInspectDialog(betId)
     -- Set bet info
     self.inspectDialog.betTitle:SetText(COLOR_YELLOW .. bet.title .. COLOR_RESET)
     
-    -- Build participant list
-    local participantInfo = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. " (confirmed only)\n"
-    participantInfo = participantInfo .. "Created by: " .. GetPlayerBaseName(bet.createdBy) .. "\n\n"
+    local infoText = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. " (confirmed only) • Created by: " .. GetPlayerBaseName(bet.createdBy)
+    self.inspectDialog.infoText:SetText(infoText)
     
     -- Group participants by option
     local optionGroups = {}
@@ -752,66 +812,94 @@ function FuldStonks:ShowBetInspectDialog(betId)
         table.sort(group, function(a, b) return a.amount > b.amount end)
     end
     
-    participantInfo = participantInfo .. COLOR_YELLOW .. "Confirmed Bets:" .. COLOR_RESET .. "\n"
-    
-    -- Show breakdown for each option
-    for _, option in ipairs(bet.options) do
-        local group = optionGroups[option] or {}
-        local totalBets = 0
-        for _, p in ipairs(group) do
-            totalBets = totalBets + p.amount
-        end
-        
-        participantInfo = participantInfo .. COLOR_YELLOW .. option .. ":" .. COLOR_RESET .. " " .. #group .. " bets, " .. totalBets .. "g total"
-        
-        if totalBets > 0 and bet.totalPot > 0 then
-            local percentage = math.floor((totalBets / bet.totalPot) * 100)
-            participantInfo = participantInfo .. " (" .. percentage .. "%)"
-        end
-        participantInfo = participantInfo .. "\n"
-        
-        if #group > 0 then
-            for _, p in ipairs(group) do
-                local baseName = GetPlayerBaseName(p.name)
-                if bet.totalPot > 0 then
-                    local percentage = math.floor((p.amount / bet.totalPot) * 100)
-                    participantInfo = participantInfo .. "  " .. baseName .. ": " .. p.amount .. "g (" .. percentage .. "%)\n"
-                else
-                    participantInfo = participantInfo .. "  " .. baseName .. ": " .. p.amount .. "g\n"
-                end
-            end
-        else
-            participantInfo = participantInfo .. "  No bets\n"
-        end
-        participantInfo = participantInfo .. "\n"
+    -- Build Yes section
+    local yesGroup = optionGroups["Yes"] or {}
+    local yesTotalBets = 0
+    for _, p in ipairs(yesGroup) do
+        yesTotalBets = yesTotalBets + p.amount
     end
     
-    -- Show pending bets section
+    local yesInfo = #yesGroup .. " bets • " .. COLOR_GREEN .. yesTotalBets .. "g" .. COLOR_RESET
+    if yesTotalBets > 0 and bet.totalPot > 0 then
+        local percentage = math.floor((yesTotalBets / bet.totalPot) * 100)
+        yesInfo = yesInfo .. " (" .. percentage .. "%)"
+    end
+    yesInfo = yesInfo .. "\n\n"
+    
+    if #yesGroup > 0 then
+        for _, p in ipairs(yesGroup) do
+            local baseName = GetPlayerBaseName(p.name)
+            if bet.totalPot > 0 then
+                local percentage = math.floor((p.amount / bet.totalPot) * 100)
+                yesInfo = yesInfo .. baseName .. "\n" .. COLOR_GREEN .. p.amount .. "g" .. COLOR_RESET .. " (" .. percentage .. "%)\n\n"
+            else
+                yesInfo = yesInfo .. baseName .. "\n" .. COLOR_GREEN .. p.amount .. "g" .. COLOR_RESET .. "\n\n"
+            end
+        end
+    else
+        yesInfo = yesInfo .. COLOR_GRAY .. "No bets placed" .. COLOR_RESET .. "\n"
+    end
+    
+    self.inspectDialog.yesText:SetText(yesInfo)
+    local yesHeight = self.inspectDialog.yesText:GetStringHeight()
+    self.inspectDialog.yesContent:SetHeight(math.max(yesHeight + 20, 100))
+    
+    -- Build No section
+    local noGroup = optionGroups["No"] or {}
+    local noTotalBets = 0
+    for _, p in ipairs(noGroup) do
+        noTotalBets = noTotalBets + p.amount
+    end
+    
+    local noInfo = #noGroup .. " bets • " .. COLOR_RED .. noTotalBets .. "g" .. COLOR_RESET
+    if noTotalBets > 0 and bet.totalPot > 0 then
+        local percentage = math.floor((noTotalBets / bet.totalPot) * 100)
+        noInfo = noInfo .. " (" .. percentage .. "%)"
+    end
+    noInfo = noInfo .. "\n\n"
+    
+    if #noGroup > 0 then
+        for _, p in ipairs(noGroup) do
+            local baseName = GetPlayerBaseName(p.name)
+            if bet.totalPot > 0 then
+                local percentage = math.floor((p.amount / bet.totalPot) * 100)
+                noInfo = noInfo .. baseName .. "\n" .. COLOR_RED .. p.amount .. "g" .. COLOR_RESET .. " (" .. percentage .. "%)\n\n"
+            else
+                noInfo = noInfo .. baseName .. "\n" .. COLOR_RED .. p.amount .. "g" .. COLOR_RESET .. "\n\n"
+            end
+        end
+    else
+        noInfo = noInfo .. COLOR_GRAY .. "No bets placed" .. COLOR_RESET .. "\n"
+    end
+    
+    self.inspectDialog.noText:SetText(noInfo)
+    local noHeight = self.inspectDialog.noText:GetStringHeight()
+    self.inspectDialog.noContent:SetHeight(math.max(noHeight + 20, 100))
+    
+    -- Build pending bets section
+    local pendingInfo = ""
     local hasPendingBets = false
+    
     for playerName, pendingBet in pairs(self.pendingBets) do
         if pendingBet.betId == betId then
             hasPendingBets = true
-            break
+            local baseName = GetPlayerBaseName(playerName)
+            local optionColor = pendingBet.option == "Yes" and COLOR_GREEN or COLOR_RED
+            pendingInfo = pendingInfo .. COLOR_ORANGE .. "⏳" .. COLOR_RESET .. " " .. baseName .. " • " .. optionColor .. pendingBet.option .. COLOR_RESET .. " • " .. pendingBet.amount .. "g • " .. COLOR_ORANGE .. "Awaiting trade" .. COLOR_RESET .. "\n\n"
         end
     end
     
-    if hasPendingBets then
-        participantInfo = participantInfo .. "\n" .. COLOR_ORANGE .. "Pending Bets (Not in pot yet):" .. COLOR_RESET .. "\n"
-        for playerName, pendingBet in pairs(self.pendingBets) do
-            if pendingBet.betId == betId then
-                local baseName = GetPlayerBaseName(playerName)
-                participantInfo = participantInfo .. COLOR_ORANGE .. "⏳ " .. baseName .. " wants to bet " .. pendingBet.amount .. "g on " .. pendingBet.option .. " - Awaiting trade" .. COLOR_RESET .. "\n"
-            end
+    if not hasPendingBets then
+        if bet.totalPot == 0 then
+            pendingInfo = COLOR_GRAY .. "No bets or pending bets yet" .. COLOR_RESET
+        else
+            pendingInfo = COLOR_GRAY .. "No pending bets" .. COLOR_RESET
         end
-    elseif bet.totalPot == 0 then
-        participantInfo = participantInfo .. "\n" .. COLOR_GRAY .. "No bets placed yet" .. COLOR_RESET .. "\n"
     end
     
-    self.inspectDialog.participantsText:SetText(participantInfo)
-    
-    -- Update scroll content height
-    local textHeight = self.inspectDialog.participantsText:GetStringHeight()
-    self.inspectDialog.scrollContent:SetHeight(math.max(textHeight + 20, 200))
+    self.inspectDialog.pendingText:SetText(pendingInfo)
+    local pendingHeight = self.inspectDialog.pendingText:GetStringHeight()
+    self.inspectDialog.pendingContent:SetHeight(math.max(pendingHeight + 20, 80))
     
     self.inspectDialog:Show()
 end
