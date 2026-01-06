@@ -45,12 +45,7 @@ local function DebugPrint(msg)
     end
 end
 
--- Helper function for heartbeat debug output (only shows if both debug and debugHeartbeat are enabled)
-local function DebugPrintHeartbeat(msg)
-    if FuldStonksDB.debug == true and FuldStonksDB.debugHeartbeat == true then
-        print(COLOR_GREEN .. "FuldStonks [DEBUG:HB]" .. COLOR_RESET .. " " .. tostring(msg))
-    end
-end
+
 
 -- Helper function to extract base name (remove realm suffix)
 -- Handles hyphenated names correctly: "Mary-Jane-Stormrage" -> "Mary-Jane"
@@ -833,7 +828,6 @@ local function SlashCommandHandler(msg)
         print("  /FuldStonks sync - Request sync from guild/group")
         print("  /FuldStonks peers - Show connected peers")
         print("  /FuldStonks debug - Toggle debug mode")
-        print("  /FuldStonks heartbeat - Toggle heartbeat debug output")
         print("  /FuldStonks create - Create a new bet")
         print("  /FuldStonks pending - Show pending bets (bet creator only)")
         print("  /FuldStonks cancel - Cancel your pending bet")
@@ -858,12 +852,6 @@ local function SlashCommandHandler(msg)
     elseif command == "debug" then
         FuldStonksDB.debug = not FuldStonksDB.debug
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Debug mode: " .. (FuldStonksDB.debug and "ON" or "OFF"))
-    elseif command == "heartbeat" then
-        FuldStonksDB.debugHeartbeat = not FuldStonksDB.debugHeartbeat
-        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Heartbeat debug: " .. (FuldStonksDB.debugHeartbeat and "ON" or "OFF"))
-        if FuldStonksDB.debugHeartbeat and not FuldStonksDB.debug then
-            print(COLOR_YELLOW .. "  Note: Also enable /fs debug to see heartbeat output" .. COLOR_RESET)
-        end
     elseif command == "create" then
         -- Show bet creation dialog
         FuldStonks:ShowBetCreationDialog()
@@ -1041,7 +1029,6 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         local peerBetCount = tonumber(arg2) or 0
         FuldStonks.peers[sender].version = peerVersion
         FuldStonks.peers[sender].betCount = peerBetCount
-        DebugPrintHeartbeat(sender .. " heartbeat: v" .. peerVersion .. ", " .. peerBetCount .. " bets")
         
     elseif msgType == MSG_SYNC_REQUEST then
         DebugPrint(sender .. " requested sync")
@@ -1327,7 +1314,7 @@ local function OnTradeClosed()
         }
         
         -- Delay gold check slightly because TRADE_CLOSED fires before gold is added
-        C_Timer.After(0.1, function()
+        C_Timer.After(0.5, function()
             -- Check if our money increased by the expected amount
             local currentGold = math.floor(GetMoney() / 10000)
             local goldIncrease = currentGold - tradeInfo.goldBefore
@@ -1382,9 +1369,6 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             -- Initialize debug mode if not set
             if FuldStonksDB.debug == nil then
                 FuldStonksDB.debug = false
-            end
-            if FuldStonksDB.debugHeartbeat == nil then
-                FuldStonksDB.debugHeartbeat = false
             end
             
             -- Start heartbeat timer (every 30 seconds)
@@ -1513,6 +1497,27 @@ function FuldStonks:PlaceBet(betId, option, amount)
     
     if not validOption then
         print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Error: Invalid option!")
+        return
+    end
+    
+    -- Check if player is the bet creator
+    local isCreator = (bet.createdBy == playerFullName)
+    
+    if isCreator then
+        -- Bet creator can participate without trading (can't trade with themselves)
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Placing bet as creator (no trade required)...")
+        
+        -- Directly confirm the bet
+        self:ConfirmBetTrade(playerFullName, betId, option, amount)
+        
+        -- Clear any pending bet
+        self.pendingBets[playerFullName] = nil
+        
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet placed successfully!")
+        print("  Bet: " .. bet.title)
+        print("  Choice: " .. COLOR_YELLOW .. option .. COLOR_RESET)
+        print("  Amount: " .. amount .. "g")
+        
         return
     end
     
