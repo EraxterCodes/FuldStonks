@@ -24,6 +24,8 @@ FuldStonks.frame = nil
 FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, betCount = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
 FuldStonks.syncRequested = false
+FuldStonks.heartbeatTicker = nil  -- Store heartbeat ticker for cleanup
+FuldStonks.rosterUpdateTimer = nil  -- Debounce timer for roster updates
 
 -- Event frame for initialization
 local eventFrame = CreateFrame("Frame")
@@ -96,7 +98,8 @@ local function CreateMainFrame()
             for name, data in pairs(FuldStonks.peers) do
                 if count < 5 then  -- Show max 5 peers
                     local timeSince = math.floor(GetTime() - data.lastSeen)
-                    local baseName = name:gsub("%-.*", "")
+                    -- Remove realm suffix (last hyphen and everything after)
+                    local baseName = name:gsub("%-[^%-]*$", "")
                     text = text .. "  • " .. baseName .. " (" .. timeSince .. "s ago)\n"
                     count = count + 1
                 end
@@ -120,9 +123,19 @@ local function CreateMainFrame()
     end)
     
     -- Update peers display every 2 seconds when visible
-    frame.updateTicker = C_Timer.NewTicker(2, function()
-        if frame:IsShown() then
-            frame:UpdatePeers()
+    frame:SetScript("OnShow", function(self)
+        self:UpdatePeers()
+        self.updateTicker = C_Timer.NewTicker(2, function()
+            if self:IsShown() then
+                self:UpdatePeers()
+            end
+        end)
+    end)
+    
+    frame:SetScript("OnHide", function(self)
+        if self.updateTicker then
+            self.updateTicker:Cancel()
+            self.updateTicker = nil
         end
     end)
     
@@ -165,7 +178,9 @@ local function SlashCommandHandler(msg)
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Connected peers:")
         for name, data in pairs(FuldStonks.peers) do
             local timeSince = math.floor(GetTime() - data.lastSeen)
-            print("  " .. name .. " (seen " .. timeSince .. "s ago)")
+            -- Remove realm suffix (last hyphen and everything after)
+            local baseName = name:gsub("%-[^%-]*$", "")
+            print("  " .. baseName .. " (seen " .. timeSince .. "s ago)")
             count = count + 1
         end
         if count == 0 then
@@ -213,19 +228,21 @@ local function GetBroadcastChannel()
     end
 end
 
--- Serialize data for transmission (simple pipe-separated format)
+-- Serialize data for transmission (use ASCII control character as delimiter)
+local DELIMITER = "\001"  -- ASCII SOH (Start of Heading) - safe delimiter
+
 local function SerializeMessage(msgType, ...)
     local parts = {msgType}
     for i = 1, select("#", ...) do
         local v = select(i, ...)
         table.insert(parts, tostring(v))
     end
-    return table.concat(parts, "|")
+    return table.concat(parts, DELIMITER)
 end
 
 -- Deserialize received message
 local function DeserializeMessage(message)
-    local parts = {strsplit("|", message)}
+    local parts = {strsplit(DELIMITER, message)}
     local msgType = parts[1]
     table.remove(parts, 1)
     return msgType, unpack(parts)
@@ -365,16 +382,23 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             end
             
             -- Start heartbeat timer (every 30 seconds)
-            C_Timer.NewTicker(30, function()
+            if FuldStonks.heartbeatTicker then
+                FuldStonks.heartbeatTicker:Cancel()
+            end
+            FuldStonks.heartbeatTicker = C_Timer.NewTicker(30, function()
                 FuldStonks:SendHeartbeat()
             end)
         end
     elseif event == "CHAT_MSG_ADDON" then
         OnAddonMessageReceived(...)
     elseif event == "GROUP_ROSTER_UPDATE" then
-        -- Group composition changed, send heartbeat
-        C_Timer.After(1.0, function()
+        -- Debounce roster updates to prevent spam
+        if FuldStonks.rosterUpdateTimer then
+            FuldStonks.rosterUpdateTimer:Cancel()
+        end
+        FuldStonks.rosterUpdateTimer = C_Timer.NewTimer(1.5, function()
             FuldStonks:SendHeartbeat()
+            FuldStonks.rosterUpdateTimer = nil
         end)
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- Entering world/instance, request sync
