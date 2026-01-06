@@ -660,12 +660,12 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         
         local bet = FuldStonksDB.activeBets[betId]
         if bet then
-            if not bet.participants[playerName] then
-                bet.participants[playerName] = {}
+            -- Update or add participant (handle existing bets properly)
+            local oldAmount = 0
+            if bet.participants[playerName] then
+                oldAmount = bet.participants[playerName].amount or 0
             end
             
-            -- Update or add participant
-            local oldAmount = (bet.participants[playerName].amount or 0)
             bet.participants[playerName] = {
                 option = option,
                 amount = amount
@@ -860,9 +860,10 @@ function FuldStonks:PlaceBet(betId, option, amount)
         return
     end
     
-    -- Record bet placement
-    if not bet.participants[playerFullName] then
-        bet.participants[playerFullName] = {}
+    -- Record bet placement (handle bet changes by subtracting old amount)
+    local oldAmount = 0
+    if bet.participants[playerFullName] then
+        oldAmount = bet.participants[playerFullName].amount or 0
     end
     
     bet.participants[playerFullName] = {
@@ -870,7 +871,7 @@ function FuldStonks:PlaceBet(betId, option, amount)
         amount = amount
     }
     
-    bet.totalPot = bet.totalPot + amount
+    bet.totalPot = bet.totalPot - oldAmount + amount
     
     -- Broadcast to other players
     self:BroadcastMessage(MSG_BET_PLACED, betId, playerFullName, option, amount)
