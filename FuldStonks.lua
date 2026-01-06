@@ -1319,35 +1319,45 @@ local function OnTradeClosed()
     DebugPrint("Trade window closed")
     
     if FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
-        -- Check if our money increased by the expected amount
-        local currentGold = math.floor(GetMoney() / 10000)
-        local goldIncrease = currentGold - FuldStonks.currentTrade.goldBefore
+        -- Store trade info locally before clearing (C_Timer callback needs it)
+        local tradeInfo = {
+            betInfo = FuldStonks.currentTrade.betInfo,
+            goldBefore = FuldStonks.currentTrade.goldBefore,
+            traderName = FuldStonks.currentTrade.traderName or FuldStonks.currentTrade.player
+        }
         
-        DebugPrint("Gold before trade: " .. FuldStonks.currentTrade.goldBefore .. "g, after: " .. currentGold .. "g, increase: " .. goldIncrease .. "g")
-        
-        local pendingBet = FuldStonks.currentTrade.betInfo
-        local traderName = FuldStonks.currentTrade.traderName or FuldStonks.currentTrade.player
-        local bet = FuldStonksDB.activeBets[pendingBet.betId]
-        
-        -- Only confirm if we are the bet creator and received the correct amount
-        if bet and bet.createdBy == playerFullName then
-            if goldIncrease == pendingBet.amount then
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade completed successfully! Confirming bet...")
-                DebugPrint("Received " .. goldIncrease .. "g, matches expected " .. pendingBet.amount .. "g")
-                
-                -- Confirm the bet
-                FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, pendingBet.amount)
-                
-                -- Remove from pending
-                FuldStonks.pendingBets[traderName] = nil
-                
-                DebugPrint("Removed pending bet for " .. traderName)
-            elseif goldIncrease > 0 then
-                print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Trade amount mismatch! Expected " .. pendingBet.amount .. "g but received " .. goldIncrease .. "g")
-            else
-                DebugPrint("Trade was cancelled or failed - no gold received")
+        -- Delay gold check slightly because TRADE_CLOSED fires before gold is added
+        C_Timer.After(0.1, function()
+            -- Check if our money increased by the expected amount
+            local currentGold = math.floor(GetMoney() / 10000)
+            local goldIncrease = currentGold - tradeInfo.goldBefore
+            
+            DebugPrint("Gold before trade: " .. tradeInfo.goldBefore .. "g, after: " .. currentGold .. "g, increase: " .. goldIncrease .. "g")
+            
+            local pendingBet = tradeInfo.betInfo
+            local traderName = tradeInfo.traderName
+            local bet = FuldStonksDB.activeBets[pendingBet.betId]
+            
+            -- Only confirm if we are the bet creator and received the correct amount
+            if bet and bet.createdBy == playerFullName then
+                if goldIncrease == pendingBet.amount then
+                    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade completed successfully! Confirming bet...")
+                    DebugPrint("Received " .. goldIncrease .. "g, matches expected " .. pendingBet.amount .. "g")
+                    
+                    -- Confirm the bet
+                    FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, pendingBet.amount)
+                    
+                    -- Remove from pending
+                    FuldStonks.pendingBets[traderName] = nil
+                    
+                    DebugPrint("Removed pending bet for " .. traderName)
+                elseif goldIncrease > 0 then
+                    print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Trade amount mismatch! Expected " .. pendingBet.amount .. "g but received " .. goldIncrease .. "g")
+                else
+                    DebugPrint("Trade was cancelled or failed - no gold received")
+                end
             end
-        end
+        end)
     end
     
     -- Clear trade info
