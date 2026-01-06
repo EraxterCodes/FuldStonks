@@ -17,6 +17,7 @@ local COLOR_GREEN = "|cFF00FF00"
 local COLOR_RESET = "|r"
 local COLOR_YELLOW = "|cFFFFFF00"
 local COLOR_RED = "|cFFFF0000"
+local BET_HOLDER = "Flyvflyvspyt-Kazzak"  -- Player who holds the gold for bets
 
 -- Addon state
 FuldStonks.version = "0.1.0"
@@ -27,6 +28,7 @@ FuldStonks.syncRequested = false
 FuldStonks.heartbeatTicker = nil  -- Store heartbeat ticker for cleanup
 FuldStonks.rosterUpdateTimer = nil  -- Debounce timer for roster updates
 FuldStonks.betIdCounter = 0      -- Counter for generating unique bet IDs
+FuldStonks.pendingBets = {}      -- Track pending bets awaiting gold trade: {betId, option, amount}
 
 -- Event frame for initialization
 local eventFrame = CreateFrame("Frame")
@@ -79,7 +81,8 @@ local function DeserializeBet(betString)
         timestamp = tonumber(parts[6]) or 0,
         participants = {},  -- {playerName = {option = "Yes", amount = 100}}
         totalPot = 0,
-        status = "active"   -- active, locked, resolved
+        status = "active",   -- active, locked, resolved
+        pendingTrades = {}   -- Only used by bet holder
     }
     return bet
 end
@@ -448,6 +451,7 @@ local function SlashCommandHandler(msg)
         print("  /FuldStonks peers - Show connected peers")
         print("  /FuldStonks debug - Toggle debug mode")
         print("  /FuldStonks create - Create a new bet")
+        print("  /FuldStonks pending - Show pending bets (bet holder only)")
     elseif command == "version" then
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " version " .. FuldStonks.version)
     elseif command == "sync" then
@@ -471,6 +475,23 @@ local function SlashCommandHandler(msg)
     elseif command == "create" then
         -- Show bet creation dialog
         FuldStonks:ShowBetCreationDialog()
+    elseif command == "pending" then
+        -- Show pending bets (bet holder only)
+        local count = 0
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Pending bets awaiting trade:")
+        for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
+            local bet = FuldStonksDB.activeBets[pendingBet.betId]
+            if bet then
+                local baseName = GetPlayerBaseName(playerName)
+                local timeAgo = math.floor(GetTime() - pendingBet.timestamp)
+                print("  " .. baseName .. ": " .. pendingBet.amount .. "g on " .. COLOR_YELLOW .. pendingBet.option .. COLOR_RESET .. " (" .. timeAgo .. "s ago)")
+                print("    Bet: " .. bet.title)
+                count = count + 1
+            end
+        end
+        if count == 0 then
+            print("  No pending bets.")
+        end
     else
         -- Default: toggle UI
         ToggleMainFrame()
@@ -793,6 +814,101 @@ eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
+eventFrame:RegisterEvent("TRADE_SHOW")
+eventFrame:RegisterEvent("TRADE_MONEY_CHANGED")
+eventFrame:RegisterEvent("TRADE_ACCEPT_UPDATE")
+
+-- ============================================
+-- TRADE HANDLING FOR BET HOLDER
+-- ============================================
+
+-- Track trade information
+FuldStonks.currentTrade = {
+    player = nil,
+    amount = 0,
+    betInfo = nil
+}
+
+-- Handle trade window opening
+local function OnTradeShow()
+    local tradeName = UnitName("NPC")
+    if not tradeName then return end
+    
+    -- Get full name with realm
+    local _, tradeRealm = UnitFullName("NPC")
+    local tradeFullName = (tradeRealm and tradeRealm ~= "" and (tradeName .. "-" .. tradeRealm)) or tradeName
+    
+    FuldStonks.currentTrade.player = tradeFullName
+    FuldStonks.currentTrade.amount = 0
+    FuldStonks.currentTrade.betInfo = nil
+    
+    -- If this player is the bet holder, check for pending trades
+    if playerFullName == BET_HOLDER then
+        -- Look for pending bet from this player
+        for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
+            if playerName == tradeFullName then
+                FuldStonks.currentTrade.betInfo = pendingBet
+                DebugPrint("Trade opened with " .. tradeName .. " who has pending bet for " .. pendingBet.amount .. "g")
+                break
+            end
+        end
+    end
+end
+
+-- Handle gold being added to trade
+local function OnTradeMoneyChanged()
+    local playerGold = GetPlayerTradeMoney()
+    local targetGold = GetTargetTradeMoney()
+    
+    -- Track the amount being received
+    FuldStonks.currentTrade.amount = math.floor(targetGold / 10000)  -- Convert copper to gold
+    
+    if playerFullName == BET_HOLDER and FuldStonks.currentTrade.betInfo then
+        local expected = FuldStonks.currentTrade.betInfo.amount
+        if FuldStonks.currentTrade.amount == expected then
+            local traderName = GetPlayerBaseName(FuldStonks.currentTrade.player)
+            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. traderName .. " is trading correct amount: " .. expected .. "g")
+        elseif FuldStonks.currentTrade.amount > 0 then
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Warning: Expected " .. expected .. "g but receiving " .. FuldStonks.currentTrade.amount .. "g")
+        end
+    end
+end
+
+-- Handle trade completion
+local function OnTradeAcceptUpdate(player, target)
+    if player == 1 and target == 1 then
+        -- Trade is complete
+        if playerFullName == BET_HOLDER and FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
+            local pendingBet = FuldStonks.currentTrade.betInfo
+            local traderName = FuldStonks.currentTrade.player
+            
+            -- Confirm the bet
+            C_Timer.After(0.5, function()
+                FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
+                
+                -- Remove from pending
+                FuldStonks.pendingBets[traderName] = nil
+            end)
+        end
+    end
+end
+
+-- Add trade handlers to event frame
+local originalOnEvent = eventFrame:GetScript("OnEvent")
+eventFrame:SetScript("OnEvent", function(self, event, ...)
+    if event == "TRADE_SHOW" then
+        OnTradeShow()
+    elseif event == "TRADE_MONEY_CHANGED" then
+        OnTradeMoneyChanged()
+    elseif event == "TRADE_ACCEPT_UPDATE" then
+        OnTradeAcceptUpdate(...)
+    else
+        -- Call original handler
+        if originalOnEvent then
+            originalOnEvent(self, event, ...)
+        end
+    end
+end)
 
 -- ============================================
 -- FUTURE EXPANSION HOOKS
@@ -813,7 +929,8 @@ function FuldStonks:CreateBet(betData)
         timestamp = GetTime(),
         participants = {},
         totalPot = 0,
-        status = "active"
+        status = "active",
+        pendingTrades = {}  -- Track pending gold trades
     }
     
     -- Add to active bets
@@ -826,9 +943,14 @@ function FuldStonks:CreateBet(betData)
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet created: " .. bet.title)
     DebugPrint("Created bet: " .. betId)
     
-    -- Update UI if open
-    if self.frame and self.frame:IsShown() then
-        self.frame:UpdateBetList()
+    -- Force UI update if frame exists
+    if self.frame then
+        -- Schedule update slightly delayed to ensure DB is saved
+        C_Timer.After(0.1, function()
+            if self.frame and self.frame.UpdateBetList then
+                self.frame:UpdateBetList()
+            end
+        end)
     end
     
     return betId
@@ -860,24 +982,58 @@ function FuldStonks:PlaceBet(betId, option, amount)
         return
     end
     
-    -- Record bet placement (handle bet changes by subtracting old amount)
-    local oldAmount = 0
-    if bet.participants[playerFullName] then
-        oldAmount = bet.participants[playerFullName].amount or 0
+    -- Store pending bet (waiting for gold trade)
+    self.pendingBets[playerFullName] = {
+        betId = betId,
+        option = option,
+        amount = amount,
+        timestamp = GetTime()
+    }
+    
+    -- Whisper the bet holder to initiate trade
+    local betTitle = bet.title
+    local whisperMsg = string.format("FuldStonks: Trading you %dg for '%s' (betting %s)", amount, betTitle, option)
+    SendChatMessage(whisperMsg, "WHISPER", nil, BET_HOLDER)
+    
+    print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Please trade " .. amount .. "g to " .. GetPlayerBaseName(BET_HOLDER) .. " to confirm your bet.")
+    print("  Bet: " .. betTitle)
+    print("  Choice: " .. COLOR_YELLOW .. option .. COLOR_RESET)
+    
+    DebugPrint("Pending bet: " .. betId .. " | " .. option .. " | " .. amount .. "g - awaiting trade")
+end
+
+-- Confirm bet after gold trade (called by bet holder)
+function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
+    local bet = FuldStonksDB.activeBets[betId]
+    if not bet then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Error: Bet not found for confirmation!")
+        return
     end
     
-    bet.participants[playerFullName] = {
+    -- Record bet placement (handle bet changes by subtracting old amount)
+    local oldAmount = 0
+    if bet.participants[playerName] then
+        oldAmount = bet.participants[playerName].amount or 0
+    end
+    
+    bet.participants[playerName] = {
         option = option,
-        amount = amount
+        amount = amount,
+        confirmed = true
     }
     
     bet.totalPot = bet.totalPot - oldAmount + amount
     
     -- Broadcast to other players
-    self:BroadcastMessage(MSG_BET_PLACED, betId, playerFullName, option, amount)
+    self:BroadcastMessage(MSG_BET_PLACED, betId, playerName, option, amount)
     
-    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Placed " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET)
-    DebugPrint("Placed bet: " .. betId .. " | " .. option .. " | " .. amount .. "g")
+    -- Whisper confirmation to the player
+    local betTitle = bet.title
+    local confirmMsg = string.format("FuldStonks: Confirmed %dg for '%s' (%s). Pot now: %dg", amount, betTitle, option, bet.totalPot)
+    SendChatMessage(confirmMsg, "WHISPER", nil, playerName)
+    
+    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Confirmed " .. GetPlayerBaseName(playerName) .. "'s bet: " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET)
+    DebugPrint("Confirmed bet: " .. betId .. " | " .. playerName .. " | " .. option .. " | " .. amount .. "g")
     
     -- Update UI if open
     if self.frame and self.frame:IsShown() then
