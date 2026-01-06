@@ -45,6 +45,13 @@ local function DebugPrint(msg)
     end
 end
 
+-- Helper function for heartbeat debug output (only shows if both debug and debugHeartbeat are enabled)
+local function DebugPrintHeartbeat(msg)
+    if FuldStonksDB.debug == true and FuldStonksDB.debugHeartbeat == true then
+        print(COLOR_GREEN .. "FuldStonks [DEBUG:HB]" .. COLOR_RESET .. " " .. tostring(msg))
+    end
+end
+
 -- Helper function to extract base name (remove realm suffix)
 -- Handles hyphenated names correctly: "Mary-Jane-Stormrage" -> "Mary-Jane"
 local function GetPlayerBaseName(fullName)
@@ -826,6 +833,7 @@ local function SlashCommandHandler(msg)
         print("  /FuldStonks sync - Request sync from guild/group")
         print("  /FuldStonks peers - Show connected peers")
         print("  /FuldStonks debug - Toggle debug mode")
+        print("  /FuldStonks heartbeat - Toggle heartbeat debug output")
         print("  /FuldStonks create - Create a new bet")
         print("  /FuldStonks pending - Show pending bets (bet creator only)")
         print("  /FuldStonks cancel - Cancel your pending bet")
@@ -850,6 +858,12 @@ local function SlashCommandHandler(msg)
     elseif command == "debug" then
         FuldStonksDB.debug = not FuldStonksDB.debug
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Debug mode: " .. (FuldStonksDB.debug and "ON" or "OFF"))
+    elseif command == "heartbeat" then
+        FuldStonksDB.debugHeartbeat = not FuldStonksDB.debugHeartbeat
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Heartbeat debug: " .. (FuldStonksDB.debugHeartbeat and "ON" or "OFF"))
+        if FuldStonksDB.debugHeartbeat and not FuldStonksDB.debug then
+            print(COLOR_YELLOW .. "  Note: Also enable /fs debug to see heartbeat output" .. COLOR_RESET)
+        end
     elseif command == "create" then
         -- Show bet creation dialog
         FuldStonks:ShowBetCreationDialog()
@@ -1027,7 +1041,7 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         local peerBetCount = tonumber(arg2) or 0
         FuldStonks.peers[sender].version = peerVersion
         FuldStonks.peers[sender].betCount = peerBetCount
-        DebugPrint(sender .. " heartbeat: v" .. peerVersion .. ", " .. peerBetCount .. " bets")
+        DebugPrintHeartbeat(sender .. " heartbeat: v" .. peerVersion .. ", " .. peerBetCount .. " bets")
         
     elseif msgType == MSG_SYNC_REQUEST then
         DebugPrint(sender .. " requested sync")
@@ -1359,6 +1373,9 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             if FuldStonksDB.debug == nil then
                 FuldStonksDB.debug = false
             end
+            if FuldStonksDB.debugHeartbeat == nil then
+                FuldStonksDB.debugHeartbeat = false
+            end
             
             -- Start heartbeat timer (every 30 seconds)
             if FuldStonks.heartbeatTicker then
@@ -1497,15 +1514,15 @@ function FuldStonks:PlaceBet(betId, option, amount)
         timestamp = GetTime()
     }
     
-    -- Broadcast pending bet notification to bet creator via whisper addon message
-    -- This allows the bet creator to know about the pending trade
+    -- Broadcast pending bet notification to bet creator
+    -- Use current channel (GUILD/PARTY/RAID/INSTANCE) instead of WHISPER for addon messages
     local betTitle = bet.title
     local betCreator = bet.createdBy
     
-    -- Send addon message to bet creator with pending bet info
+    -- Send addon message to bet creator with pending bet info via broadcast channel
     local pendingMsg = betId .. DELIMITER .. option .. DELIMITER .. tostring(amount)
-    DebugPrint("Sending pending bet notification to " .. betCreator .. ": " .. pendingMsg)
-    C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, MSG_BET_PENDING .. DELIMITER .. pendingMsg, "WHISPER", betCreator)
+    DebugPrint("Sending pending bet notification: " .. pendingMsg)
+    self:BroadcastMessage(MSG_BET_PENDING, betId, option, tostring(amount))
     
     -- Also send regular whisper for visibility
     local whisperMsg = string.format("FuldStonks: Trading you %dg for '%s' (betting %s)", amount, betTitle, option)
