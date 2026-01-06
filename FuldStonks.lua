@@ -36,9 +36,18 @@ local playerFullName = (playerRealm and playerRealm ~= "" and (playerName .. "-"
 
 -- Helper function for debug output
 local function DebugPrint(msg)
-    if FuldStonksDB.debug then
+    if FuldStonksDB.debug == true then
         print(COLOR_GREEN .. "FuldStonks [DEBUG]" .. COLOR_RESET .. " " .. tostring(msg))
     end
+end
+
+-- Helper function to extract base name (remove realm suffix)
+-- Handles hyphenated names correctly: "Mary-Jane-Stormrage" -> "Mary-Jane"
+local function GetPlayerBaseName(fullName)
+    if not fullName or fullName == "" then
+        return fullName
+    end
+    return fullName:gsub("%-[^%-]*$", "")
 end
 
 -- Addon initialization
@@ -98,8 +107,7 @@ local function CreateMainFrame()
             for name, data in pairs(FuldStonks.peers) do
                 if count < 5 then  -- Show max 5 peers
                     local timeSince = math.floor(GetTime() - data.lastSeen)
-                    -- Remove realm suffix (last hyphen and everything after)
-                    local baseName = name:gsub("%-[^%-]*$", "")
+                    local baseName = GetPlayerBaseName(name)
                     text = text .. "  • " .. baseName .. " (" .. timeSince .. "s ago)\n"
                     count = count + 1
                 end
@@ -178,8 +186,7 @@ local function SlashCommandHandler(msg)
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Connected peers:")
         for name, data in pairs(FuldStonks.peers) do
             local timeSince = math.floor(GetTime() - data.lastSeen)
-            -- Remove realm suffix (last hyphen and everything after)
-            local baseName = name:gsub("%-[^%-]*$", "")
+            local baseName = GetPlayerBaseName(name)
             print("  " .. baseName .. " (seen " .. timeSince .. "s ago)")
             count = count + 1
         end
@@ -244,8 +251,8 @@ end
 local function DeserializeMessage(message)
     local parts = {strsplit(DELIMITER, message)}
     local msgType = parts[1]
-    table.remove(parts, 1)
-    return msgType, unpack(parts)
+    -- Use unpack starting from index 2 to avoid expensive table.remove
+    return msgType, unpack(parts, 2)
 end
 
 -- Send addon message with rate limiting
@@ -406,6 +413,16 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             FuldStonks:SendHeartbeat()
             FuldStonks:RequestSync()
         end)
+    elseif event == "PLAYER_LOGOUT" then
+        -- Clean up timers on logout
+        if FuldStonks.heartbeatTicker then
+            FuldStonks.heartbeatTicker:Cancel()
+            FuldStonks.heartbeatTicker = nil
+        end
+        if FuldStonks.rosterUpdateTimer then
+            FuldStonks.rosterUpdateTimer:Cancel()
+            FuldStonks.rosterUpdateTimer = nil
+        end
     end
 end)
 
@@ -414,6 +431,7 @@ eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("PLAYER_LOGOUT")
 
 -- ============================================
 -- FUTURE EXPANSION HOOKS
