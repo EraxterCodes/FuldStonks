@@ -84,7 +84,7 @@ The addon aims to:
 ### Manual Installation
 1. Download the latest release from the releases page
 2. Extract the `FuldStonks` folder to your WoW addons directory:
-   - **Windows**: `C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns\`
+   - **Windows**: `C:\Program Files\World of Warcraft\_retail_\Interface\AddOns\` (or `Program Files (x86)` for older installations)
    - **Mac**: `/Applications/World of Warcraft/_retail_/Interface/AddOns/`
 3. Restart World of Warcraft or reload UI with `/reload`
 4. Verify installation by typing `/FuldStonks` or `/fs` in-game
