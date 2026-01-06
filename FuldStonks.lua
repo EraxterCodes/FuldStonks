@@ -220,6 +220,23 @@ local function CreateMainFrame()
                         resolveButton:SetScript("OnClick", function()
                             FuldStonks:ShowBetResolutionDialog(betId)
                         end)
+                        buttonOffset = buttonOffset + 85
+                    end
+                    
+                    -- Add Inspect button for all bets with participants
+                    local participantCount = 0
+                    for _ in pairs(bet.participants) do
+                        participantCount = participantCount + 1
+                    end
+                    
+                    if participantCount > 0 then
+                        local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                        inspectButton:SetSize(80, 22)
+                        inspectButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
+                        inspectButton:SetText("Inspect")
+                        inspectButton:SetScript("OnClick", function()
+                            FuldStonks:ShowBetInspectDialog(betId)
+                        end)
                     end
                 end
                 
@@ -659,6 +676,123 @@ function FuldStonks:ShowBetSelectionDialog()
     print("Use: /fs resolve (from UI click Resolve button on the specific bet)")
 end
 
+-- Show bet inspect dialog
+function FuldStonks:ShowBetInspectDialog(betId)
+    local bet = FuldStonksDB.activeBets[betId]
+    if not bet then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Bet not found!")
+        return
+    end
+    
+    -- Create dialog if it doesn't exist
+    if not self.inspectDialog then
+        local dialog = CreateFrame("Frame", "FuldStonksInspectDialog", UIParent, "BasicFrameTemplateWithInset")
+        dialog:SetSize(450, 400)
+        dialog:SetPoint("CENTER")
+        dialog:SetMovable(true)
+        dialog:EnableMouse(true)
+        dialog:RegisterForDrag("LeftButton")
+        dialog:SetScript("OnDragStart", dialog.StartMoving)
+        dialog:SetScript("OnDragStop", dialog.StopMovingOrSizing)
+        dialog:SetFrameStrata("DIALOG")
+        dialog:Hide()
+        
+        dialog.title = dialog:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        dialog.title:SetPoint("TOP", dialog.TitleBg, "TOP", 0, -3)
+        dialog.title:SetText("Inspect Bet")
+        
+        dialog.betTitle = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.betTitle:SetPoint("TOP", dialog, "TOP", 0, -35)
+        dialog.betTitle:SetWidth(420)
+        dialog.betTitle:SetJustifyH("CENTER")
+        
+        -- Scrollable participant list
+        dialog.scrollFrame = CreateFrame("ScrollFrame", nil, dialog, "UIPanelScrollFrameTemplate")
+        dialog.scrollFrame:SetPoint("TOPLEFT", dialog, "TOPLEFT", 20, -70)
+        dialog.scrollFrame:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -30, 50)
+        
+        dialog.scrollContent = CreateFrame("Frame", nil, dialog.scrollFrame)
+        dialog.scrollContent:SetSize(390, 1)
+        dialog.scrollFrame:SetScrollChild(dialog.scrollContent)
+        
+        dialog.participantsText = dialog.scrollContent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        dialog.participantsText:SetPoint("TOPLEFT", dialog.scrollContent, "TOPLEFT", 0, 0)
+        dialog.participantsText:SetWidth(390)
+        dialog.participantsText:SetJustifyH("LEFT")
+        
+        dialog.closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+        dialog.closeButton:SetSize(100, 25)
+        dialog.closeButton:SetPoint("BOTTOM", dialog, "BOTTOM", 0, 15)
+        dialog.closeButton:SetText("Close")
+        dialog.closeButton:SetScript("OnClick", function()
+            dialog:Hide()
+        end)
+        
+        dialog.CloseButton:SetScript("OnClick", function()
+            dialog:Hide()
+        end)
+        
+        self.inspectDialog = dialog
+    end
+    
+    -- Set bet info
+    self.inspectDialog.betTitle:SetText(COLOR_YELLOW .. bet.title .. COLOR_RESET)
+    
+    -- Build participant list
+    local participantInfo = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. "\n"
+    participantInfo = participantInfo .. "Created by: " .. GetPlayerBaseName(bet.createdBy) .. "\n\n"
+    
+    -- Group participants by option
+    local optionGroups = {}
+    for playerName, participation in pairs(bet.participants) do
+        if not optionGroups[participation.option] then
+            optionGroups[participation.option] = {}
+        end
+        table.insert(optionGroups[participation.option], {name = playerName, amount = participation.amount})
+    end
+    
+    -- Sort participants within each group by amount (highest first)
+    for option, group in pairs(optionGroups) do
+        table.sort(group, function(a, b) return a.amount > b.amount end)
+    end
+    
+    -- Show breakdown for each option
+    for _, option in ipairs(bet.options) do
+        local group = optionGroups[option] or {}
+        local totalBets = 0
+        for _, p in ipairs(group) do
+            totalBets = totalBets + p.amount
+        end
+        
+        participantInfo = participantInfo .. COLOR_YELLOW .. option .. ":" .. COLOR_RESET .. " " .. #group .. " bets, " .. totalBets .. "g total"
+        
+        if totalBets > 0 then
+            local percentage = math.floor((totalBets / bet.totalPot) * 100)
+            participantInfo = participantInfo .. " (" .. percentage .. "%)"
+        end
+        participantInfo = participantInfo .. "\n"
+        
+        if #group > 0 then
+            for _, p in ipairs(group) do
+                local baseName = GetPlayerBaseName(p.name)
+                local percentage = math.floor((p.amount / bet.totalPot) * 100)
+                participantInfo = participantInfo .. "  " .. baseName .. ": " .. p.amount .. "g (" .. percentage .. "%)\n"
+            end
+        else
+            participantInfo = participantInfo .. "  No bets\n"
+        end
+        participantInfo = participantInfo .. "\n"
+    end
+    
+    self.inspectDialog.participantsText:SetText(participantInfo)
+    
+    -- Update scroll content height
+    local textHeight = self.inspectDialog.participantsText:GetStringHeight()
+    self.inspectDialog.scrollContent:SetHeight(math.max(textHeight + 20, 200))
+    
+    self.inspectDialog:Show()
+end
+
 -- Slash command handler
 local function SlashCommandHandler(msg)
     local command = strtrim(msg:lower())
@@ -1034,6 +1168,12 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             FuldStonks.rosterUpdateTimer:Cancel()
             FuldStonks.rosterUpdateTimer = nil
         end
+    elseif event == "TRADE_SHOW" then
+        OnTradeShow()
+    elseif event == "TRADE_MONEY_CHANGED" then
+        OnTradeMoneyChanged()
+    elseif event == "TRADE_ACCEPT_UPDATE" then
+        OnTradeAcceptUpdate(...)
     end
 end)
 
@@ -1071,14 +1211,25 @@ local function OnTradeShow()
     FuldStonks.currentTrade.amount = 0
     FuldStonks.currentTrade.betInfo = nil
     
+    DebugPrint("Trade window opened with: " .. tradeFullName)
+    
     -- Check if someone is trading us for a bet we created
+    -- Try both full name and base name for same-realm compatibility
     for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
-        if playerName == tradeFullName then
+        local playerBaseName = GetPlayerBaseName(playerName)
+        local tradeBaseName = GetPlayerBaseName(tradeFullName)
+        
+        -- Match by full name OR base name (for same-realm players)
+        if playerName == tradeFullName or playerBaseName == tradeBaseName then
             local bet = FuldStonksDB.activeBets[pendingBet.betId]
             -- Only accept trades if we are the bet creator
             if bet and bet.createdBy == playerFullName then
                 FuldStonks.currentTrade.betInfo = pendingBet
-                DebugPrint("Trade opened with " .. tradeName .. " who has pending bet for " .. pendingBet.amount .. "g")
+                FuldStonks.currentTrade.traderName = playerName  -- Store the actual key used in pendingBets
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade detected for pending bet:")
+                print("  Bet: " .. bet.title)
+                print("  Expected: " .. pendingBet.amount .. "g")
+                DebugPrint("Trade opened with " .. tradeBaseName .. " who has pending bet for " .. pendingBet.amount .. "g")
                 break
             end
         end
@@ -1087,11 +1238,12 @@ end
 
 -- Handle gold being added to trade
 local function OnTradeMoneyChanged()
-    local playerGold = GetPlayerTradeMoney()
     local targetGold = GetTargetTradeMoney()
     
-    -- Track the amount being received
-    FuldStonks.currentTrade.amount = math.floor(targetGold / 10000)  -- Convert copper to gold
+    -- Track the amount being received (convert copper to gold)
+    FuldStonks.currentTrade.amount = math.floor(targetGold / 10000)
+    
+    DebugPrint("Trade money changed: receiving " .. FuldStonks.currentTrade.amount .. "g")
     
     if FuldStonks.currentTrade.betInfo then
         local bet = FuldStonksDB.activeBets[FuldStonks.currentTrade.betInfo.betId]
@@ -1099,7 +1251,7 @@ local function OnTradeMoneyChanged()
             local expected = FuldStonks.currentTrade.betInfo.amount
             if FuldStonks.currentTrade.amount == expected then
                 local traderName = GetPlayerBaseName(FuldStonks.currentTrade.player)
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. traderName .. " is trading correct amount: " .. expected .. "g")
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. traderName .. " is trading the correct amount: " .. expected .. "g")
             elseif FuldStonks.currentTrade.amount > 0 then
                 print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Warning: Expected " .. expected .. "g but receiving " .. FuldStonks.currentTrade.amount .. "g")
             end
@@ -1110,42 +1262,31 @@ end
 -- Handle trade completion
 local function OnTradeAcceptUpdate(player, target)
     if player == 1 and target == 1 then
-        -- Trade is complete
+        -- Both players accepted the trade
         if FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
             local pendingBet = FuldStonks.currentTrade.betInfo
-            local traderName = FuldStonks.currentTrade.player
+            local traderName = FuldStonks.currentTrade.traderName or FuldStonks.currentTrade.player
             local bet = FuldStonksDB.activeBets[pendingBet.betId]
+            
+            DebugPrint("Trade accepted by both parties. Amount: " .. FuldStonks.currentTrade.amount .. "g")
             
             -- Only confirm if we are the bet creator
             if bet and bet.createdBy == playerFullName then
-                -- Confirm the bet
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade completing...")
+                
+                -- Confirm the bet after a short delay (to ensure trade completes)
                 C_Timer.After(0.5, function()
                     FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
                     
                     -- Remove from pending
                     FuldStonks.pendingBets[traderName] = nil
+                    
+                    DebugPrint("Removed pending bet for " .. traderName)
                 end)
             end
         end
     end
 end
-
--- Add trade handlers to event frame
-local originalOnEvent = eventFrame:GetScript("OnEvent")
-eventFrame:SetScript("OnEvent", function(self, event, ...)
-    if event == "TRADE_SHOW" then
-        OnTradeShow()
-    elseif event == "TRADE_MONEY_CHANGED" then
-        OnTradeMoneyChanged()
-    elseif event == "TRADE_ACCEPT_UPDATE" then
-        OnTradeAcceptUpdate(...)
-    else
-        -- Call original handler
-        if originalOnEvent then
-            originalOnEvent(self, event, ...)
-        end
-    end
-end)
 
 -- ============================================
 -- FUTURE EXPANSION HOOKS
