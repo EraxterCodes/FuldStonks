@@ -8,6 +8,10 @@ local ADDON_NAME, FuldStonks = ...
 -- Initialize saved variables
 FuldStonksDB = FuldStonksDB or {}
 
+-- Constants
+local COLOR_GREEN = "|cFF00FF00"
+local COLOR_RESET = "|r"
+
 -- Addon state
 FuldStonks.version = "0.1.0"
 FuldStonks.frame = nil
@@ -17,7 +21,7 @@ local eventFrame = CreateFrame("Frame")
 
 -- Addon initialization
 local function Initialize()
-    print("|cFF00FF00FuldStonks|r addon loaded! Type /FuldStonks or /fs to open the UI.")
+    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " addon loaded! Type /FuldStonks or /fs to open the UI.")
 end
 
 -- Create the main UI frame (placeholder)
@@ -78,15 +82,15 @@ end
 
 -- Slash command handler
 local function SlashCommandHandler(msg)
-    local command = msg:lower():trim()
+    local command = strtrim(msg:lower())
     
     if command == "help" then
-        print("|cFF00FF00FuldStonks|r Commands:")
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Commands:")
         print("  /FuldStonks or /fs - Toggle main UI")
         print("  /FuldStonks help - Show this help message")
         print("  /FuldStonks version - Show addon version")
     elseif command == "version" then
-        print("|cFF00FF00FuldStonks|r version " .. FuldStonks.version)
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " version " .. FuldStonks.version)
     else
         -- Default: toggle UI
         ToggleMainFrame()
@@ -178,6 +182,3 @@ end
 function FuldStonks:LoadData()
     -- TODO: Implement loading saved data from SavedVariables
 end
-
--- Export namespace for debugging
-_G.FuldStonks = FuldStonks
