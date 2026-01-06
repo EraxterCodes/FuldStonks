@@ -1127,7 +1127,9 @@ end
 FuldStonks.currentTrade = {
     player = nil,
     amount = 0,
-    betInfo = nil
+    betInfo = nil,
+    traderName = nil,
+    goldBefore = 0
 }
 
 -- Handle trade window opening
@@ -1142,8 +1144,10 @@ local function OnTradeShow()
     FuldStonks.currentTrade.player = tradeFullName
     FuldStonks.currentTrade.amount = 0
     FuldStonks.currentTrade.betInfo = nil
+    FuldStonks.currentTrade.goldBefore = math.floor(GetMoney() / 10000)  -- Store current gold
     
     DebugPrint("Trade window opened with: " .. tradeFullName)
+    DebugPrint("Current gold: " .. FuldStonks.currentTrade.goldBefore .. "g")
     
     -- Check if someone is trading us for a bet we created
     -- Try both full name and base name for same-realm compatibility
@@ -1199,29 +1203,38 @@ local function OnTradeAcceptUpdate(player, target)
     end
 end
 
--- Handle trade completion (when trade actually finishes successfully)
-local function OnTradeFinished()
-    DebugPrint("Trade finished successfully")
+-- Handle trade window closing (check if money increased)
+local function OnTradeClosed()
+    DebugPrint("Trade window closed")
     
     if FuldStonks.currentTrade.betInfo and FuldStonks.currentTrade.amount > 0 then
+        -- Check if our money increased by the expected amount
+        local currentGold = math.floor(GetMoney() / 10000)
+        local goldIncrease = currentGold - FuldStonks.currentTrade.goldBefore
+        
+        DebugPrint("Gold before trade: " .. FuldStonks.currentTrade.goldBefore .. "g, after: " .. currentGold .. "g, increase: " .. goldIncrease .. "g")
+        
         local pendingBet = FuldStonks.currentTrade.betInfo
         local traderName = FuldStonks.currentTrade.traderName or FuldStonks.currentTrade.player
         local bet = FuldStonksDB.activeBets[pendingBet.betId]
         
         -- Only confirm if we are the bet creator and received the correct amount
         if bet and bet.createdBy == playerFullName then
-            if FuldStonks.currentTrade.amount == pendingBet.amount then
+            if goldIncrease == pendingBet.amount then
                 print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade completed successfully! Confirming bet...")
+                DebugPrint("Received " .. goldIncrease .. "g, matches expected " .. pendingBet.amount .. "g")
                 
                 -- Confirm the bet
-                FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, FuldStonks.currentTrade.amount)
+                FuldStonks:ConfirmBetTrade(traderName, pendingBet.betId, pendingBet.option, pendingBet.amount)
                 
                 -- Remove from pending
                 FuldStonks.pendingBets[traderName] = nil
                 
                 DebugPrint("Removed pending bet for " .. traderName)
+            elseif goldIncrease > 0 then
+                print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Trade amount mismatch! Expected " .. pendingBet.amount .. "g but received " .. goldIncrease .. "g")
             else
-                print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Trade amount mismatch! Expected " .. pendingBet.amount .. "g but received " .. FuldStonks.currentTrade.amount .. "g")
+                DebugPrint("Trade was cancelled or failed - no gold received")
             end
         end
     end
@@ -1231,7 +1244,8 @@ local function OnTradeFinished()
         player = nil,
         amount = 0,
         betInfo = nil,
-        traderName = nil
+        traderName = nil,
+        goldBefore = 0
     }
 end
 
@@ -1290,8 +1304,8 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         OnTradeMoneyChanged()
     elseif event == "TRADE_ACCEPT_UPDATE" then
         OnTradeAcceptUpdate(...)
-    elseif event == "TRADE_FINISHED" then
-        OnTradeFinished()
+    elseif event == "TRADE_CLOSED" then
+        OnTradeClosed()
     end
 end)
 
@@ -1304,7 +1318,7 @@ eventFrame:RegisterEvent("PLAYER_LOGOUT")
 eventFrame:RegisterEvent("TRADE_SHOW")
 eventFrame:RegisterEvent("TRADE_MONEY_CHANGED")
 eventFrame:RegisterEvent("TRADE_ACCEPT_UPDATE")
-eventFrame:RegisterEvent("TRADE_FINISHED")
+eventFrame:RegisterEvent("TRADE_CLOSED")
 
 -- ============================================
 -- FUTURE EXPANSION HOOKS
