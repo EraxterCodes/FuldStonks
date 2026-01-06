@@ -18,6 +18,7 @@ local COLOR_RESET = "|r"
 local COLOR_YELLOW = "|cFFFFFF00"
 local COLOR_RED = "|cFFFF0000"
 local COLOR_ORANGE = "|cFFFF8800"
+local COLOR_GRAY = "|cFF808080"
 
 -- Addon state
 FuldStonks.version = "0.1.0"
@@ -223,21 +224,14 @@ local function CreateMainFrame()
                         buttonOffset = buttonOffset + 85
                     end
                     
-                    -- Add Inspect button for all bets with participants
-                    local participantCount = 0
-                    for _ in pairs(bet.participants) do
-                        participantCount = participantCount + 1
-                    end
-                    
-                    if participantCount > 0 then
-                        local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
-                        inspectButton:SetSize(80, 22)
-                        inspectButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
-                        inspectButton:SetText("Inspect")
-                        inspectButton:SetScript("OnClick", function()
-                            FuldStonks:ShowBetInspectDialog(betId)
-                        end)
-                    end
+                    -- Add Inspect button for all bets (shows confirmed and pending bets)
+                    local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                    inspectButton:SetSize(80, 22)
+                    inspectButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
+                    inspectButton:SetText("Inspect")
+                    inspectButton:SetScript("OnClick", function()
+                        FuldStonks:ShowBetInspectDialog(betId)
+                    end)
                 end
                 
                 yOffset = yOffset + 85
@@ -739,7 +733,7 @@ function FuldStonks:ShowBetInspectDialog(betId)
     self.inspectDialog.betTitle:SetText(COLOR_YELLOW .. bet.title .. COLOR_RESET)
     
     -- Build participant list
-    local participantInfo = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. "\n"
+    local participantInfo = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. " (confirmed only)\n"
     participantInfo = participantInfo .. "Created by: " .. GetPlayerBaseName(bet.createdBy) .. "\n\n"
     
     -- Group participants by option
@@ -756,6 +750,8 @@ function FuldStonks:ShowBetInspectDialog(betId)
         table.sort(group, function(a, b) return a.amount > b.amount end)
     end
     
+    participantInfo = participantInfo .. COLOR_YELLOW .. "Confirmed Bets:" .. COLOR_RESET .. "\n"
+    
     -- Show breakdown for each option
     for _, option in ipairs(bet.options) do
         local group = optionGroups[option] or {}
@@ -766,7 +762,7 @@ function FuldStonks:ShowBetInspectDialog(betId)
         
         participantInfo = participantInfo .. COLOR_YELLOW .. option .. ":" .. COLOR_RESET .. " " .. #group .. " bets, " .. totalBets .. "g total"
         
-        if totalBets > 0 then
+        if totalBets > 0 and bet.totalPot > 0 then
             local percentage = math.floor((totalBets / bet.totalPot) * 100)
             participantInfo = participantInfo .. " (" .. percentage .. "%)"
         end
@@ -775,13 +771,38 @@ function FuldStonks:ShowBetInspectDialog(betId)
         if #group > 0 then
             for _, p in ipairs(group) do
                 local baseName = GetPlayerBaseName(p.name)
-                local percentage = math.floor((p.amount / bet.totalPot) * 100)
-                participantInfo = participantInfo .. "  " .. baseName .. ": " .. p.amount .. "g (" .. percentage .. "%)\n"
+                if bet.totalPot > 0 then
+                    local percentage = math.floor((p.amount / bet.totalPot) * 100)
+                    participantInfo = participantInfo .. "  " .. baseName .. ": " .. p.amount .. "g (" .. percentage .. "%)\n"
+                else
+                    participantInfo = participantInfo .. "  " .. baseName .. ": " .. p.amount .. "g\n"
+                end
             end
         else
             participantInfo = participantInfo .. "  No bets\n"
         end
         participantInfo = participantInfo .. "\n"
+    end
+    
+    -- Show pending bets section
+    local hasPendingBets = false
+    for playerName, pendingBet in pairs(self.pendingBets) do
+        if pendingBet.betId == betId then
+            hasPendingBets = true
+            break
+        end
+    end
+    
+    if hasPendingBets then
+        participantInfo = participantInfo .. "\n" .. COLOR_ORANGE .. "Pending Bets (Not in pot yet):" .. COLOR_RESET .. "\n"
+        for playerName, pendingBet in pairs(self.pendingBets) do
+            if pendingBet.betId == betId then
+                local baseName = GetPlayerBaseName(playerName)
+                participantInfo = participantInfo .. COLOR_ORANGE .. "⏳ " .. baseName .. " wants to bet " .. pendingBet.amount .. "g on " .. pendingBet.option .. " - Awaiting trade" .. COLOR_RESET .. "\n"
+            end
+        end
+    elseif bet.totalPot == 0 then
+        participantInfo = participantInfo .. "\n" .. COLOR_GRAY .. "No bets placed yet" .. COLOR_RESET .. "\n"
     end
     
     self.inspectDialog.participantsText:SetText(participantInfo)
