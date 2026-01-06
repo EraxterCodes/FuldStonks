@@ -1119,74 +1119,6 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
     end
 end
 
--- Event handler
-eventFrame:SetScript("OnEvent", function(self, event, ...)
-    if event == "ADDON_LOADED" then
-        local addonName = ...
-        if addonName == ADDON_NAME then
-            Initialize()
-            InitializeAddonComms()
-            FuldStonks:LoadData()
-            
-            -- Initialize debug mode if not set
-            if FuldStonksDB.debug == nil then
-                FuldStonksDB.debug = false
-            end
-            
-            -- Start heartbeat timer (every 30 seconds)
-            if FuldStonks.heartbeatTicker then
-                FuldStonks.heartbeatTicker:Cancel()
-            end
-            FuldStonks.heartbeatTicker = C_Timer.NewTicker(30, function()
-                FuldStonks:SendHeartbeat()
-            end)
-        end
-    elseif event == "CHAT_MSG_ADDON" then
-        OnAddonMessageReceived(...)
-    elseif event == "GROUP_ROSTER_UPDATE" then
-        -- Debounce roster updates to prevent spam
-        if FuldStonks.rosterUpdateTimer then
-            FuldStonks.rosterUpdateTimer:Cancel()
-        end
-        FuldStonks.rosterUpdateTimer = C_Timer.NewTimer(1.5, function()
-            FuldStonks:SendHeartbeat()
-            FuldStonks.rosterUpdateTimer = nil
-        end)
-    elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Entering world/instance, request sync
-        C_Timer.After(2.0, function()
-            FuldStonks:SendHeartbeat()
-            FuldStonks:RequestSync()
-        end)
-    elseif event == "PLAYER_LOGOUT" then
-        -- Clean up timers on logout
-        if FuldStonks.heartbeatTicker then
-            FuldStonks.heartbeatTicker:Cancel()
-            FuldStonks.heartbeatTicker = nil
-        end
-        if FuldStonks.rosterUpdateTimer then
-            FuldStonks.rosterUpdateTimer:Cancel()
-            FuldStonks.rosterUpdateTimer = nil
-        end
-    elseif event == "TRADE_SHOW" then
-        OnTradeShow()
-    elseif event == "TRADE_MONEY_CHANGED" then
-        OnTradeMoneyChanged()
-    elseif event == "TRADE_ACCEPT_UPDATE" then
-        OnTradeAcceptUpdate(...)
-    end
-end)
-
--- Register events
-eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:RegisterEvent("CHAT_MSG_ADDON")
-eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
-eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:RegisterEvent("PLAYER_LOGOUT")
-eventFrame:RegisterEvent("TRADE_SHOW")
-eventFrame:RegisterEvent("TRADE_MONEY_CHANGED")
-eventFrame:RegisterEvent("TRADE_ACCEPT_UPDATE")
-
 -- ============================================
 -- TRADE HANDLING FOR BET HOLDER
 -- ============================================
@@ -1287,6 +1219,74 @@ local function OnTradeAcceptUpdate(player, target)
         end
     end
 end
+
+-- Event handler
+eventFrame:SetScript("OnEvent", function(self, event, ...)
+    if event == "ADDON_LOADED" then
+        local addonName = ...
+        if addonName == ADDON_NAME then
+            Initialize()
+            InitializeAddonComms()
+            FuldStonks:LoadData()
+            
+            -- Initialize debug mode if not set
+            if FuldStonksDB.debug == nil then
+                FuldStonksDB.debug = false
+            end
+            
+            -- Start heartbeat timer (every 30 seconds)
+            if FuldStonks.heartbeatTicker then
+                FuldStonks.heartbeatTicker:Cancel()
+            end
+            FuldStonks.heartbeatTicker = C_Timer.NewTicker(30, function()
+                FuldStonks:SendHeartbeat()
+            end)
+        end
+    elseif event == "CHAT_MSG_ADDON" then
+        OnAddonMessageReceived(...)
+    elseif event == "GROUP_ROSTER_UPDATE" then
+        -- Debounce roster updates to prevent spam
+        if FuldStonks.rosterUpdateTimer then
+            FuldStonks.rosterUpdateTimer:Cancel()
+        end
+        FuldStonks.rosterUpdateTimer = C_Timer.NewTimer(1.5, function()
+            FuldStonks:SendHeartbeat()
+            FuldStonks.rosterUpdateTimer = nil
+        end)
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Entering world/instance, request sync
+        C_Timer.After(2.0, function()
+            FuldStonks:SendHeartbeat()
+            FuldStonks:RequestSync()
+        end)
+    elseif event == "PLAYER_LOGOUT" then
+        -- Clean up timers on logout
+        if FuldStonks.heartbeatTicker then
+            FuldStonks.heartbeatTicker:Cancel()
+            FuldStonks.heartbeatTicker = nil
+        end
+        if FuldStonks.rosterUpdateTimer then
+            FuldStonks.rosterUpdateTimer:Cancel()
+            FuldStonks.rosterUpdateTimer = nil
+        end
+    elseif event == "TRADE_SHOW" then
+        OnTradeShow()
+    elseif event == "TRADE_MONEY_CHANGED" then
+        OnTradeMoneyChanged()
+    elseif event == "TRADE_ACCEPT_UPDATE" then
+        OnTradeAcceptUpdate(...)
+    end
+end)
+
+-- Register events
+eventFrame:RegisterEvent("ADDON_LOADED")
+eventFrame:RegisterEvent("CHAT_MSG_ADDON")
+eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("PLAYER_LOGOUT")
+eventFrame:RegisterEvent("TRADE_SHOW")
+eventFrame:RegisterEvent("TRADE_MONEY_CHANGED")
+eventFrame:RegisterEvent("TRADE_ACCEPT_UPDATE")
 
 -- ============================================
 -- FUTURE EXPANSION HOOKS
