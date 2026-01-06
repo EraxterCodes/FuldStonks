@@ -1151,24 +1151,41 @@ local function OnTradeShow()
     
     -- Check if someone is trading us for a bet we created
     -- Try both full name and base name for same-realm compatibility
+    DebugPrint("Checking pending bets for trader: " .. tradeFullName)
+    local foundMatch = false
     for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
+        DebugPrint("  Pending bet from: " .. playerName .. " for betId: " .. pendingBet.betId)
         local playerBaseName = GetPlayerBaseName(playerName)
         local tradeBaseName = GetPlayerBaseName(tradeFullName)
         
         -- Match by full name OR base name (for same-realm players)
         if playerName == tradeFullName or playerBaseName == tradeBaseName then
+            DebugPrint("    Name matches! Checking bet...")
             local bet = FuldStonksDB.activeBets[pendingBet.betId]
-            -- Only accept trades if we are the bet creator
-            if bet and bet.createdBy == playerFullName then
-                FuldStonks.currentTrade.betInfo = pendingBet
-                FuldStonks.currentTrade.traderName = playerName  -- Store the actual key used in pendingBets
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade detected for pending bet:")
-                print("  Bet: " .. bet.title)
-                print("  Expected: " .. pendingBet.amount .. "g")
-                DebugPrint("Trade opened with " .. tradeBaseName .. " who has pending bet for " .. pendingBet.amount .. "g")
-                break
+            if bet then
+                DebugPrint("    Bet found. Creator: " .. bet.createdBy .. ", Me: " .. playerFullName)
+                -- Only accept trades if we are the bet creator
+                if bet.createdBy == playerFullName then
+                    FuldStonks.currentTrade.betInfo = pendingBet
+                    FuldStonks.currentTrade.traderName = playerName  -- Store the actual key used in pendingBets
+                    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Trade detected for pending bet:")
+                    print("  Bet: " .. bet.title)
+                    print("  Expected: " .. pendingBet.amount .. "g")
+                    DebugPrint("Trade opened with " .. tradeBaseName .. " who has pending bet for " .. pendingBet.amount .. "g")
+                    foundMatch = true
+                    break
+                else
+                    DebugPrint("    Not the bet creator, skipping")
+                end
+            else
+                DebugPrint("    Bet not found in activeBets")
             end
+        else
+            DebugPrint("    Name doesn't match: '" .. playerName .. "' vs '" .. tradeFullName .. "' (base: '" .. playerBaseName .. "' vs '" .. tradeBaseName .. "')")
         end
+    end
+    if not foundMatch then
+        DebugPrint("No matching pending bet found for this trade")
     end
 end
 
