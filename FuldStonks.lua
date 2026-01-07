@@ -1099,9 +1099,12 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         return
     end
     
-    DebugPrint("Received from " .. sender .. " [" .. channel .. "]: " .. message)
-    
     local msgType, arg1, arg2, arg3 = DeserializeMessage(message)
+    
+    -- Skip debug print for heartbeat messages to reduce spam
+    if msgType ~= MSG_HEARTBEAT then
+        DebugPrint("Received from " .. sender .. " [" .. channel .. "]: " .. message)
+    end
     local now = GetTime()
     
     -- Update peer tracking
@@ -1549,6 +1552,13 @@ function FuldStonks:CreateBet(betData)
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet created: " .. bet.title)
     DebugPrint("Created bet: " .. betId)
     
+    -- Announce bet creation in in-game chat
+    local channel = GetBroadcastChannel()
+    -- Use concatenation instead of format to avoid issues with special characters in bet title
+    local announceMsg = "I just created '" .. bet.title .. "' bet, take part by typing /fs"
+    -- GetBroadcastChannel() always returns a valid channel, so we can safely send
+    SendChatMessage(announceMsg, channel)
+    
     -- Force UI update if frame exists
     if self.frame then
         -- Schedule update slightly delayed to ensure DB is saved
@@ -1682,10 +1692,12 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
     -- Broadcast to other players
     self:BroadcastMessage(MSG_BET_PLACED, betId, playerName, option, amount)
     
-    -- Whisper confirmation to the player
-    local betTitle = bet.title
-    local confirmMsg = string.format("FuldStonks: Confirmed %dg for '%s' (%s). Pot now: %dg", amount, betTitle, option, bet.totalPot)
-    SendChatMessage(confirmMsg, "WHISPER", nil, playerName)
+    -- Whisper confirmation to the player (but not to ourselves if we're the creator)
+    if playerName ~= playerFullName then
+        local betTitle = bet.title
+        local confirmMsg = string.format("FuldStonks: Confirmed %dg for '%s' (%s). Pot now: %dg", amount, betTitle, option, bet.totalPot)
+        SendChatMessage(confirmMsg, "WHISPER", nil, playerName)
+    end
     
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Confirmed " .. GetPlayerBaseName(playerName) .. "'s bet: " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET)
     DebugPrint("Confirmed bet: " .. betId .. " | " .. playerName .. " | " .. option .. " | " .. amount .. "g")
