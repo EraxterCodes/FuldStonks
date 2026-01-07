@@ -23,6 +23,13 @@ local COLOR_RED = "|cFFFF0000"
 local COLOR_ORANGE = "|cFFFF8800"
 local COLOR_GRAY = "|cFF808080"
 
+-- State sync constants
+local STATE_SYNC_INTERVAL = 5  -- Seconds between state broadcasts
+local STATE_CLEANUP_TIMEOUT = 30  -- Seconds before cleaning up stale state updates
+local SYNC_TYPE_HEADER = "HEADER"
+local SYNC_TYPE_BET = "BET"
+local SYNC_TYPE_PARTICIPANT = "PARTICIPANT"
+
 -- Addon state
 FuldStonks.version = "0.2.0"
 FuldStonks.frame = nil
@@ -1253,14 +1260,14 @@ end
 
 -- Increment Lamport clock for state versioning
 local function IncrementStateVersion()
-    FuldStonksDB.stateVersion = (FuldStonksDB.stateVersion or 0) + 1
+    FuldStonksDB.stateVersion = FuldStonksDB.stateVersion + 1
     DebugPrint("State version incremented to: " .. FuldStonksDB.stateVersion)
     return FuldStonksDB.stateVersion
 end
 
 -- Update Lamport clock when receiving a message
 local function UpdateStateVersion(receivedVersion)
-    local currentVersion = FuldStonksDB.stateVersion or 0
+    local currentVersion = FuldStonksDB.stateVersion
     FuldStonksDB.stateVersion = math.max(currentVersion, receivedVersion) + 1
     DebugPrint("State version updated to: " .. FuldStonksDB.stateVersion .. " (received: " .. receivedVersion .. ")")
 end
@@ -1365,8 +1372,8 @@ function FuldStonks:BroadcastStateSync()
     local snapshot = self:CreateStateSnapshot()
     
     -- Send bet data in chunks (WoW has 255 char limit per message)
-    -- Format: STATESYNC|version|nonce|betCount|participantCount
-    local header = SerializeMessage(MSG_STATE_SYNC, "HEADER", snapshot.version, snapshot.nonce, #snapshot.bets, #snapshot.participants)
+    -- Format: STATESYNC|HEADER|version|nonce|betCount|participantCount
+    local header = SerializeMessage(MSG_STATE_SYNC, SYNC_TYPE_HEADER, snapshot.version, snapshot.nonce, #snapshot.bets, #snapshot.participants)
     
     if #header <= 255 then
         C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, header, GetBroadcastChannel())
@@ -1375,7 +1382,7 @@ function FuldStonks:BroadcastStateSync()
     
     -- Send each bet
     for i, betData in ipairs(snapshot.bets) do
-        local betMsg = SerializeMessage(MSG_STATE_SYNC, "BET", snapshot.nonce, i, betData.id, betData.data)
+        local betMsg = SerializeMessage(MSG_STATE_SYNC, SYNC_TYPE_BET, snapshot.nonce, i, betData.id, betData.data)
         if #betMsg <= 255 then
             C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, betMsg, GetBroadcastChannel())
         else
@@ -1385,7 +1392,7 @@ function FuldStonks:BroadcastStateSync()
     
     -- Send participant data
     for i, participantData in ipairs(snapshot.participants) do
-        local partMsg = SerializeMessage(MSG_STATE_SYNC, "PARTICIPANT", snapshot.nonce, i, participantData.betId, participantData.data)
+        local partMsg = SerializeMessage(MSG_STATE_SYNC, SYNC_TYPE_PARTICIPANT, snapshot.nonce, i, participantData.betId, participantData.data)
         if #partMsg <= 255 then
             C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, partMsg, GetBroadcastChannel())
         else
@@ -1545,9 +1552,9 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
     
     -- Handle different message types
     if msgType == MSG_STATE_SYNC then
-        local syncType = arg1  -- HEADER, BET, or PARTICIPANT
+        local syncType = arg1  -- SYNC_TYPE_HEADER, SYNC_TYPE_BET, or SYNC_TYPE_PARTICIPANT
         
-        if syncType == "HEADER" then
+        if syncType == SYNC_TYPE_HEADER then
             -- State sync header: version, nonce, betCount, participantCount
             local version = tonumber(arg2) or 0
             local nonce = tonumber(arg3) or 0
@@ -1573,7 +1580,7 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
             
             DebugPrint("State sync started from " .. sender .. ": v" .. version .. " nonce:" .. nonce .. " expecting " .. betCount .. " bets, " .. participantCount .. " participants")
             
-        elseif syncType == "BET" then
+        elseif syncType == SYNC_TYPE_BET then
             -- Bet data: nonce, index, betId, serializedBet
             local nonce = tonumber(arg2) or 0
             local index = tonumber(arg3) or 0
@@ -1591,7 +1598,7 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
                 end
             end
             
-        elseif syncType == "PARTICIPANT" then
+        elseif syncType == SYNC_TYPE_PARTICIPANT then
             -- Participant data: nonce, index, betId, serializedParticipant
             local nonce = tonumber(arg2) or 0
             local index = tonumber(arg3) or 0
@@ -1679,11 +1686,11 @@ function FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
         -- Clean up
         self.pendingStateUpdates[sender][nonce] = nil
         
-        -- Clean up old pending updates (older than 30 seconds)
+        -- Clean up old pending updates (older than STATE_CLEANUP_TIMEOUT seconds)
         local now = GetTime()
         for peerName, nonces in pairs(self.pendingStateUpdates) do
             for n, upd in pairs(nonces) do
-                if now - upd.timestamp > 30 then
+                if now - upd.timestamp > STATE_CLEANUP_TIMEOUT then
                     DebugPrint("Cleaned up stale state update from " .. peerName .. " nonce:" .. n)
                     self.pendingStateUpdates[peerName][n] = nil
                 end
@@ -1901,11 +1908,11 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 FuldStonksDB.syncNonce = 0
             end
             
-            -- Start state sync timer (every 5 seconds)
+            -- Start state sync timer (every STATE_SYNC_INTERVAL seconds)
             if FuldStonks.syncTicker then
                 FuldStonks.syncTicker:Cancel()
             end
-            FuldStonks.syncTicker = C_Timer.NewTicker(5, function()
+            FuldStonks.syncTicker = C_Timer.NewTicker(STATE_SYNC_INTERVAL, function()
                 FuldStonks:BroadcastStateSync()
             end)
             
