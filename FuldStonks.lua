@@ -31,7 +31,7 @@ local SYNC_TYPE_BET = "BET"
 local SYNC_TYPE_PARTICIPANT = "PARTICIPANT"
 
 -- Addon state
-FuldStonks.version = "0.2.5"
+FuldStonks.version = "0.2.6"
 FuldStonks.frame = nil
 FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, stateVersion = 0, nonce = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
@@ -273,29 +273,45 @@ local function CreateMainFrame()
             if isHistory then
                 -- Determine user's outcome for this bet
                 local userParticipation = bet.participants[playerFullName]
-                local userWasPending = FuldStonks.pendingBets[playerFullName] and 
+                local isCreator = (bet.createdBy == playerFullName)
+                
+                -- Check if user was pending when bet closed (only matters if not creator)
+                local userWasPending = not isCreator and 
+                                      FuldStonks.pendingBets[playerFullName] and 
                                       FuldStonks.pendingBets[playerFullName].betId == betId
                 
-                if userWasPending or (not userParticipation and bet.createdBy ~= playerFullName) then
-                    -- User was pending or didn't participate (orange)
-                    betFrame:SetBackdropColor(0.15, 0.10, 0.05, 0.8)  -- Orange tint for pending
-                    betFrame:SetBackdropBorderColor(0.8, 0.5, 0.2, 1)
-                elseif bet.status == "resolved" and userParticipation then
-                    -- Check if user won or lost
-                    local userWon = (userParticipation.option == bet.winningOption)
-                    if userWon then
-                        -- User won (green)
-                        betFrame:SetBackdropColor(0.05, 0.20, 0.05, 0.8)  -- Bright green for won
-                        betFrame:SetBackdropBorderColor(0.2, 0.8, 0.2, 1)
+                if bet.status == "resolved" then
+                    if userParticipation then
+                        -- Check if user won or lost
+                        local userWon = (userParticipation.option == bet.winningOption)
+                        if userWon then
+                            -- User won (green)
+                            betFrame:SetBackdropColor(0.05, 0.20, 0.05, 0.8)  -- Bright green for won
+                            betFrame:SetBackdropBorderColor(0.2, 0.8, 0.2, 1)
+                        else
+                            -- User lost (red)
+                            betFrame:SetBackdropColor(0.20, 0.05, 0.05, 0.8)  -- Bright red for lost
+                            betFrame:SetBackdropBorderColor(0.8, 0.2, 0.2, 1)
+                        end
+                    elseif userWasPending then
+                        -- User was pending when resolved (orange)
+                        betFrame:SetBackdropColor(0.15, 0.10, 0.05, 0.8)  -- Orange tint for pending
+                        betFrame:SetBackdropBorderColor(0.8, 0.5, 0.2, 1)
                     else
-                        -- User lost (red)
-                        betFrame:SetBackdropColor(0.20, 0.05, 0.05, 0.8)  -- Bright red for lost
-                        betFrame:SetBackdropBorderColor(0.8, 0.2, 0.2, 1)
+                        -- Creator or spectator who didn't participate (neutral)
+                        betFrame:SetBackdropColor(0.08, 0.12, 0.08, 0.8)  -- Slight green tint (resolved)
+                        betFrame:SetBackdropBorderColor(0.3, 0.6, 0.3, 1)
                     end
                 elseif bet.status == "cancelled" then
-                    -- Cancelled (neutral red tint)
-                    betFrame:SetBackdropColor(0.15, 0.05, 0.05, 0.8)
-                    betFrame:SetBackdropBorderColor(0.6, 0.2, 0.2, 1)
+                    if userWasPending then
+                        -- User was pending when cancelled (orange)
+                        betFrame:SetBackdropColor(0.15, 0.10, 0.05, 0.8)  -- Orange tint for pending
+                        betFrame:SetBackdropBorderColor(0.8, 0.5, 0.2, 1)
+                    else
+                        -- Cancelled (red tint) - applies to participants, creators, and spectators
+                        betFrame:SetBackdropColor(0.15, 0.05, 0.05, 0.8)
+                        betFrame:SetBackdropBorderColor(0.6, 0.2, 0.2, 1)
+                    end
                 else
                     -- Default (shouldn't happen, but just in case)
                     betFrame:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
@@ -320,6 +336,10 @@ local function CreateMainFrame()
                 
                 -- Determine user's outcome
                 local userParticipation = bet.participants[playerFullName]
+                local isCreator = (bet.createdBy == playerFullName)
+                local userWasPending = not isCreator and 
+                                      FuldStonks.pendingBets[playerFullName] and 
+                                      FuldStonks.pendingBets[playerFullName].betId == betId
                 
                 if bet.status == "resolved" then
                     if userParticipation then
@@ -329,16 +349,21 @@ local function CreateMainFrame()
                         else
                             statusText:SetText(COLOR_RED .. "✗ LOST" .. COLOR_RESET)
                         end
+                    elseif userWasPending then
+                        statusText:SetText(COLOR_ORANGE .. "⏳ PENDING" .. COLOR_RESET)
                     else
-                        -- User didn't participate (shouldn't show in history but just in case)
-                        statusText:SetText(COLOR_YELLOW .. "○ SPECTATOR" .. COLOR_RESET)
+                        -- Creator or spectator who didn't participate
+                        statusText:SetText(COLOR_GREEN .. "✓ RESOLVED" .. COLOR_RESET)
                     end
                 else
                     -- Cancelled
-                    if userParticipation then
+                    if userWasPending then
+                        statusText:SetText(COLOR_ORANGE .. "⏳ PENDING" .. COLOR_RESET)
+                    elseif userParticipation then
                         statusText:SetText(COLOR_RED .. "✗ CANCELLED" .. COLOR_RESET)
                     else
-                        statusText:SetText(COLOR_ORANGE .. "⏳ PENDING" .. COLOR_RESET)
+                        -- Creator or spectator
+                        statusText:SetText(COLOR_RED .. "✗ CANCELLED" .. COLOR_RESET)
                     end
                 end
             else
@@ -1672,7 +1697,8 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
             FuldStonksDB.activeBets[betId] = nil
             changesMade = true
             
-            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet '" .. localBet.title .. "' was cancelled by creator")
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet '" .. localBet.title .. "' was closed by creator")
+            DebugPrint("Moved bet to history: " .. betId .. " status=" .. localBet.status)
         end
     end
     
