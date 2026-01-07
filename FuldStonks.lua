@@ -233,6 +233,15 @@ local function CreateMainFrame()
                         FuldStonks:CancelPendingBet()
                         self:UpdateBetList()
                     end)
+                    
+                    -- Add Inspect button even when we have a pending bet
+                    local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                    inspectButton:SetSize(80, 22)
+                    inspectButton:SetPoint("TOPLEFT", pendingText, "BOTTOMLEFT", 85, -5)
+                    inspectButton:SetText("Inspect")
+                    inspectButton:SetScript("OnClick", function()
+                        FuldStonks:ShowBetInspectDialog(betId)
+                    end)
                 else
                     -- Bet buttons for each option
                     local buttonOffset = 0
@@ -1220,6 +1229,7 @@ local MESSAGE_PREFIX = "FuldStonks"
 local MSG_STATE_SYNC = "STATESYNC"  -- Full state broadcast (sent every 5s)
 local MSG_SYNC_REQUEST = "SYNCREQ"  -- Request full state sync on demand
 local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator immediately)
+local MSG_BET_PENDING_CANCEL = "BETPNDCNL"  -- Pending bet cancellation (sent to bet creator immediately)
 
 -- Determine the best channel to send messages
 local function GetBroadcastChannel()
@@ -1418,7 +1428,9 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
         local localBet = FuldStonksDB.activeBets[betId]
         
         if not localBet then
-            -- New bet we don't have - accept it
+            -- New bet we don't have - accept it with empty participants (will be filled by participant merge)
+            receivedBet.participants = {}
+            receivedBet.totalPot = 0
             FuldStonksDB.activeBets[betId] = receivedBet
             changesMade = true
             DebugPrint("  Added new bet: " .. betId)
@@ -1428,20 +1440,30 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
             
         elseif receivedBet.stateVersion > (localBet.stateVersion or 0) then
             -- Received bet is newer - update it
-            -- Preserve local participants if they're newer
+            -- Preserve local participants and totalPot for merging
             local localParticipants = localBet.participants
+            local oldTotalPot = localBet.totalPot
+            
             FuldStonksDB.activeBets[betId] = receivedBet
             
-            -- Merge participants (will be handled separately)
+            -- Keep local participants and totalPot - will be merged properly in participant processing
             receivedBet.participants = localParticipants or {}
+            receivedBet.totalPot = oldTotalPot or 0
             
             changesMade = true
-            DebugPrint("  Updated bet: " .. betId .. " (v" .. receivedBet.stateVersion .. " > v" .. (localBet.stateVersion or 0) .. ")")
+            DebugPrint("  Updated bet metadata: " .. betId .. " (v" .. receivedBet.stateVersion .. " > v" .. (localBet.stateVersion or 0) .. ")")
             
         elseif receivedBet.stateVersion == (localBet.stateVersion or 0) then
             -- Same version - use tie-breaker (creator name lexicographically)
             if receivedBet.createdBy < localBet.createdBy then
+                local localParticipants = localBet.participants
+                local oldTotalPot = localBet.totalPot
+                
                 FuldStonksDB.activeBets[betId] = receivedBet
+                
+                receivedBet.participants = localParticipants or {}
+                receivedBet.totalPot = oldTotalPot or 0
+                
                 conflicts = conflicts + 1
                 changesMade = true
                 DebugPrint("  Conflict resolved for bet: " .. betId .. " (chose " .. receivedBet.createdBy .. "'s version)")
@@ -1450,7 +1472,9 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
         -- else: local bet is newer, keep it
     end
     
-    -- Process participants
+    -- Process participants - rebuild totalPot from scratch for each bet to avoid double-counting
+    local potsToRecalculate = {}
+    
     for betId, participants in pairs(receivedParticipants) do
         local bet = FuldStonksDB.activeBets[betId]
         if bet then
@@ -1460,21 +1484,40 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
                 if not localParticipation then
                     -- New participant
                     bet.participants[playerName] = participation
-                    bet.totalPot = (bet.totalPot or 0) + participation.amount
+                    potsToRecalculate[betId] = true
                     changesMade = true
                     
                     local baseName = GetPlayerBaseName(playerName)
                     if not FuldStonksDB.ignoredBets[betId] then
-                        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " bet " .. participation.amount .. "g on " .. COLOR_YELLOW .. participation.option .. COLOR_RESET .. " | Pot now: " .. bet.totalPot .. "g")
+                        DebugPrint("  New participant: " .. baseName .. " in bet " .. betId)
                     end
                     
                 elseif (participation.timestamp or 0) > (localParticipation.timestamp or 0) then
                     -- Received participant data is newer
-                    local oldAmount = localParticipation.amount
                     bet.participants[playerName] = participation
-                    bet.totalPot = (bet.totalPot or 0) - oldAmount + participation.amount
+                    potsToRecalculate[betId] = true
                     changesMade = true
                     DebugPrint("  Updated participant: " .. playerName .. " in bet " .. betId)
+                end
+            end
+        end
+    end
+    
+    -- Recalculate totalPot for bets that had participant changes
+    for betId, _ in pairs(potsToRecalculate) do
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet then
+            local newTotal = 0
+            for playerName, participation in pairs(bet.participants) do
+                newTotal = newTotal + participation.amount
+            end
+            
+            if newTotal ~= bet.totalPot then
+                DebugPrint("  Recalculated pot for " .. betId .. ": " .. bet.totalPot .. "g -> " .. newTotal .. "g")
+                bet.totalPot = newTotal
+                
+                if not FuldStonksDB.ignoredBets[betId] then
+                    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Pot updated for '" .. bet.title .. "': " .. newTotal .. "g")
                 end
             end
         end
@@ -1652,6 +1695,20 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
             DebugPrint("Stored pending bet for " .. sender)
         else
             DebugPrint("Bet not found or I'm not the creator, ignoring pending bet notification")
+        end
+        
+    elseif msgType == MSG_BET_PENDING_CANCEL then
+        -- Handle pending bet cancellation (received by bet creator)
+        local betId = arg1
+        
+        DebugPrint("Received pending bet cancellation from " .. sender .. " for bet: " .. tostring(betId))
+        
+        -- Remove the pending bet for this sender if it matches
+        if FuldStonks.pendingBets[sender] and FuldStonks.pendingBets[sender].betId == betId then
+            local baseName = GetPlayerBaseName(sender)
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " cancelled their pending bet")
+            FuldStonks.pendingBets[sender] = nil
+            DebugPrint("Removed pending bet for " .. sender)
         end
         
     else
@@ -2108,6 +2165,10 @@ function FuldStonks:CancelPendingBet()
     if bet then
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Cancelled pending bet: " .. bet.title)
         print("  Choice: " .. COLOR_YELLOW .. pendingBet.option .. COLOR_RESET .. " (" .. pendingBet.amount .. "g)")
+        
+        -- Notify the bet creator that we cancelled
+        self:BroadcastMessage(MSG_BET_PENDING_CANCEL, pendingBet.betId)
+        DebugPrint("Sent pending bet cancellation for: " .. pendingBet.betId)
     end
     
     self.pendingBets[playerFullName] = nil
