@@ -31,7 +31,7 @@ local SYNC_TYPE_BET = "BET"
 local SYNC_TYPE_PARTICIPANT = "PARTICIPANT"
 
 -- Addon state
-FuldStonks.version = "0.2.0"
+FuldStonks.version = "0.2.1"
 FuldStonks.frame = nil
 FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, stateVersion = 0, nonce = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
@@ -2060,8 +2060,9 @@ function FuldStonks:CreateBet(betData)
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet created: " .. bet.title)
     DebugPrint("Created bet: " .. betId .. " (v" .. stateVersion .. ")")
     
-    -- State will be broadcast in next sync cycle (every 5s)
-    -- No need to immediately broadcast
+    -- Immediately broadcast state so spectators see the new bet right away
+    -- Don't wait for the next 5s sync cycle for better UX
+    self:BroadcastStateSync()
     
     -- Force UI update if frame exists
     if self.frame then
