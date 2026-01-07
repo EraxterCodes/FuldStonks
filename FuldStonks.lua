@@ -31,7 +31,7 @@ local SYNC_TYPE_BET = "BET"
 local SYNC_TYPE_PARTICIPANT = "PARTICIPANT"
 
 -- Addon state
-FuldStonks.version = "0.2.2"
+FuldStonks.version = "0.2.3"
 FuldStonks.frame = nil
 FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, stateVersion = 0, nonce = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
@@ -126,7 +126,7 @@ local function CreateMainFrame()
     
     -- Create main frame
     local frame = CreateFrame("Frame", "FuldStonksMainFrame", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(600, 450)
+    frame:SetSize(600, 480)  -- Increased height slightly for better spacing
     frame:SetPoint("CENTER")
     frame:SetMovable(true)
     frame:EnableMouse(true)
@@ -140,22 +140,13 @@ local function CreateMainFrame()
     frame.title:SetPoint("TOP", frame.TitleBg, "TOP", 0, -3)
     frame.title:SetText("FuldStonks - Guild Betting")
     
-    -- Create "Create Bet" button
-    frame.createBetButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.createBetButton:SetSize(120, 25)
-    frame.createBetButton:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -30)
-    frame.createBetButton:SetText("Create Bet")
-    frame.createBetButton:SetScript("OnClick", function()
-        FuldStonks:ShowBetCreationDialog()
-    end)
-    
     -- Tab system
     frame.currentTab = "active"  -- "active" or "history"
     
     -- Active Bets tab button
     frame.activeTab = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.activeTab:SetSize(120, 25)
-    frame.activeTab:SetPoint("TOPLEFT", frame.createBetButton, "TOPRIGHT", 10, 0)
+    frame.activeTab:SetSize(140, 28)
+    frame.activeTab:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -30)
     frame.activeTab:SetText("Active Bets")
     frame.activeTab:SetScript("OnClick", function()
         frame.currentTab = "active"
@@ -166,7 +157,7 @@ local function CreateMainFrame()
     
     -- History tab button
     frame.historyTab = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.historyTab:SetSize(120, 25)
+    frame.historyTab:SetSize(140, 28)
     frame.historyTab:SetPoint("TOPLEFT", frame.activeTab, "TOPRIGHT", 5, 0)
     frame.historyTab:SetText("History")
     frame.historyTab:SetScript("OnClick", function()
@@ -180,18 +171,28 @@ local function CreateMainFrame()
     frame.activeTab:Disable()
     
     -- Tab content title
-    frame.tabTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.tabTitle:SetPoint("TOPLEFT", frame.createBetButton, "BOTTOMLEFT", 0, -10)
+    frame.tabTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.tabTitle:SetPoint("TOPLEFT", frame.activeTab, "BOTTOMLEFT", 5, -12)
     frame.tabTitle:SetText("Active Bets:")
     
-    -- Scrollable bet list
+    -- Scrollable bet list (adjusted to leave room for bottom button)
     frame.betList = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    frame.betList:SetPoint("TOPLEFT", frame.tabTitle, "BOTTOMLEFT", 0, -5)
-    frame.betList:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -30, 40)
+    frame.betList:SetPoint("TOPLEFT", frame.tabTitle, "BOTTOMLEFT", -5, -8)
+    frame.betList:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -30, 55)  -- More space at bottom
     
     frame.betListContent = CreateFrame("Frame", nil, frame.betList)
     frame.betListContent:SetSize(540, 1)
     frame.betList:SetScrollChild(frame.betListContent)
+    
+    -- Create "Create Bet" button at bottom (larger and centered)
+    frame.createBetButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.createBetButton:SetSize(200, 35)
+    frame.createBetButton:SetPoint("BOTTOM", frame, "BOTTOM", 0, 12)
+    frame.createBetButton:SetText("+ Create New Bet")
+    frame.createBetButton:SetNormalFontObject("GameFontNormalLarge")
+    frame.createBetButton:SetScript("OnClick", function()
+        FuldStonks:ShowBetCreationDialog()
+    end)
     
     -- Function to update bet list display
     frame.UpdateBetList = function(self)
@@ -1536,9 +1537,17 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
     -- Process each received bet
     for betId, receivedBet in pairs(receivedBets) do
         local localBet = FuldStonksDB.activeBets[betId]
+        local historyBet = FuldStonksDB.betHistory[betId]
         
-        if not localBet then
-            -- New bet we don't have - accept it with empty participants (will be filled by participant merge)
+        -- Check if we have this bet in history (cancelled/resolved)
+        if historyBet and (historyBet.stateVersion or 0) >= (receivedBet.stateVersion or 0) then
+            -- We have a newer or equal version in history, ignore the received bet
+            DebugPrint("  Ignoring bet from sync (in history with equal/newer version): " .. betId)
+            -- Don't add it back to active bets
+            
+        elseif not localBet then
+            -- New bet we don't have (and not in history or history is older)
+            -- Accept it with empty participants (will be filled by participant merge)
             receivedBet.participants = {}
             receivedBet.totalPot = 0
             FuldStonksDB.activeBets[betId] = receivedBet
