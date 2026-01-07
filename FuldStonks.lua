@@ -31,7 +31,7 @@ local SYNC_TYPE_BET = "BET"
 local SYNC_TYPE_PARTICIPANT = "PARTICIPANT"
 
 -- Addon state
-FuldStonks.version = "0.2.3"
+FuldStonks.version = "0.2.4"
 FuldStonks.frame = nil
 FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, stateVersion = 0, nonce = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
@@ -979,7 +979,8 @@ end
 
 -- Show bet inspect dialog
 function FuldStonks:ShowBetInspectDialog(betId)
-    local bet = FuldStonksDB.activeBets[betId]
+    -- Check both active bets and history
+    local bet = FuldStonksDB.activeBets[betId] or FuldStonksDB.betHistory[betId]
     if not bet then
         print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Bet not found!")
         return
@@ -1589,6 +1590,29 @@ function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion
             end
         end
         -- else: local bet is newer, keep it
+    end
+    
+    -- Check for bets that should be removed from activeBets
+    -- If a bet's creator broadcasts without including the bet, it means they cancelled/resolved it
+    for betId, localBet in pairs(FuldStonksDB.activeBets) do
+        if localBet.createdBy == sender and not receivedBets[betId] then
+            -- The creator of this bet sent a sync without including it
+            -- This means they've cancelled or resolved it
+            DebugPrint("  Removing bet " .. betId .. " (creator " .. sender .. " no longer has it active)")
+            
+            -- Move to history as "externally cancelled" if not already there
+            if not FuldStonksDB.betHistory[betId] then
+                localBet.status = "cancelled"
+                localBet.cancelledAt = GetTime()
+                localBet.stateVersion = senderVersion
+                FuldStonksDB.betHistory[betId] = localBet
+            end
+            
+            FuldStonksDB.activeBets[betId] = nil
+            changesMade = true
+            
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet '" .. localBet.title .. "' was cancelled by creator")
+        end
     end
     
     -- Process participants - rebuild totalPot from scratch for each bet to avoid double-counting
