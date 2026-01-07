@@ -214,18 +214,6 @@ local function CreateMainFrame()
                         buttonOffset = buttonOffset + 85
                     end
                     
-                    -- Show resolve button if we created this bet
-                    if bet.createdBy == playerFullName then
-                        local resolveButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
-                        resolveButton:SetSize(80, 22)
-                        resolveButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", buttonOffset, -5)
-                        resolveButton:SetText("Resolve")
-                        resolveButton:SetScript("OnClick", function()
-                            FuldStonks:ShowBetResolutionDialog(betId)
-                        end)
-                        buttonOffset = buttonOffset + 85
-                    end
-                    
                     -- Add Inspect button for all bets (shows confirmed and pending bets)
                     local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
                     inspectButton:SetSize(80, 22)
@@ -757,7 +745,7 @@ function FuldStonks:ShowBetInspectDialog(betId)
         dialog.pendingFrame = CreateFrame("Frame", nil, dialog, "InsetFrameTemplate")
         dialog.pendingFrame:SetPoint("TOPLEFT", dialog.yesFrame, "BOTTOMLEFT", 0, -10)
         dialog.pendingFrame:SetPoint("TOPRIGHT", dialog.noFrame, "BOTTOMRIGHT", 0, -10)
-        dialog.pendingFrame:SetHeight(150)
+        dialog.pendingFrame:SetHeight(80)
         
         dialog.pendingTitle = dialog.pendingFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         dialog.pendingTitle:SetPoint("TOP", dialog.pendingFrame, "TOP", 0, -8)
@@ -775,6 +763,29 @@ function FuldStonks:ShowBetInspectDialog(betId)
         dialog.pendingText:SetPoint("TOPLEFT", dialog.pendingContent, "TOPLEFT", 0, 0)
         dialog.pendingText:SetWidth(540)
         dialog.pendingText:SetJustifyH("LEFT")
+        
+        -- Resolution buttons (shown only if bet creator)
+        dialog.yesWinsButton = CreateFrame("Button", nil, dialog.yesFrame, "UIPanelButtonTemplate")
+        dialog.yesWinsButton:SetSize(80, 22)
+        dialog.yesWinsButton:SetPoint("BOTTOM", dialog.yesFrame, "BOTTOM", 0, 8)
+        dialog.yesWinsButton:SetText("YES Wins")
+        dialog.yesWinsButton:SetScript("OnClick", function()
+            if dialog.currentBetId then
+                FuldStonks:ResolveBet(dialog.currentBetId, "Yes")
+                dialog:Hide()
+            end
+        end)
+        
+        dialog.noWinsButton = CreateFrame("Button", nil, dialog.noFrame, "UIPanelButtonTemplate")
+        dialog.noWinsButton:SetSize(80, 22)
+        dialog.noWinsButton:SetPoint("BOTTOM", dialog.noFrame, "BOTTOM", 0, 8)
+        dialog.noWinsButton:SetText("NO Wins")
+        dialog.noWinsButton:SetScript("OnClick", function()
+            if dialog.currentBetId then
+                FuldStonks:ResolveBet(dialog.currentBetId, "No")
+                dialog:Hide()
+            end
+        end)
         
         -- Close button
         dialog.closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
@@ -794,9 +805,15 @@ function FuldStonks:ShowBetInspectDialog(betId)
     
     -- Set bet info
     self.inspectDialog.betTitle:SetText(COLOR_YELLOW .. bet.title .. COLOR_RESET)
+    self.inspectDialog.currentBetId = betId
     
     local infoText = "Total Pot: " .. COLOR_GREEN .. bet.totalPot .. "g" .. COLOR_RESET .. " (confirmed only) • Created by: " .. GetPlayerBaseName(bet.createdBy)
     self.inspectDialog.infoText:SetText(infoText)
+    
+    -- Show/hide resolution buttons based on whether player is bet creator
+    local isCreator = (bet.createdBy == playerFullName)
+    self.inspectDialog.yesWinsButton:SetShown(isCreator)
+    self.inspectDialog.noWinsButton:SetShown(isCreator)
     
     -- Group participants by option
     local optionGroups = {}
@@ -1047,7 +1064,9 @@ function FuldStonks:BroadcastMessage(msgType, ...)
     
     C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, message, channel)
     self.lastBroadcast = now
-    DebugPrint("Sent " .. msgType .. " to " .. channel .. ": " .. message)
+    if msgType ~= MSG_HEARTBEAT then
+        DebugPrint("Sent " .. msgType .. " to " .. channel .. ": " .. message)
+    end
     return true
 end
 
