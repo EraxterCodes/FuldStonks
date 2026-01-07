@@ -1555,9 +1555,8 @@ function FuldStonks:CreateBet(betData)
     -- Announce bet creation in in-game chat
     local channel = GetBroadcastChannel()
     local announceMsg = string.format("I just created '%s' bet, take part by typing /fs", bet.title)
-    if channel == "GUILD" or channel == "PARTY" or channel == "RAID" or channel == "INSTANCE_CHAT" then
-        SendChatMessage(announceMsg, channel)
-    end
+    -- GetBroadcastChannel() always returns a valid channel, so we can safely send
+    SendChatMessage(announceMsg, channel)
     
     -- Force UI update if frame exists
     if self.frame then
