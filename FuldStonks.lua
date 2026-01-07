@@ -1554,7 +1554,8 @@ function FuldStonks:CreateBet(betData)
     
     -- Announce bet creation in in-game chat
     local channel = GetBroadcastChannel()
-    local announceMsg = string.format("I just created '%s' bet, take part by typing /fs", bet.title)
+    -- Use concatenation instead of format to avoid issues with special characters in bet title
+    local announceMsg = "I just created '" .. bet.title .. "' bet, take part by typing /fs"
     -- GetBroadcastChannel() always returns a valid channel, so we can safely send
     SendChatMessage(announceMsg, channel)
     
