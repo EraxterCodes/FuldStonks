@@ -2,7 +2,7 @@
 ## Title: FuldStonks
 ## Notes: A guild betting addon for raid-related wagers using in-game gold
 ## Author: EraxterCodes
-## Version: 0.1.0
+## Version: 0.2.0
 ## SavedVariables: FuldStonksDB
 ## DefaultState: enabled
 

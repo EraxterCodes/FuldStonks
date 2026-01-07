@@ -10,7 +10,9 @@ FuldStonksDB = FuldStonksDB or {
     activeBets = {},      -- Active bets in the system
     myBets = {},          -- Bets I've placed
     betHistory = {},      -- Historical bets
-    ignoredBets = {}      -- Bets hidden from view
+    ignoredBets = {},     -- Bets hidden from view
+    stateVersion = 0,     -- Lamport clock for state versioning
+    syncNonce = 0         -- Nonce to track sync sessions
 }
 
 -- Constants
@@ -22,15 +24,16 @@ local COLOR_ORANGE = "|cFFFF8800"
 local COLOR_GRAY = "|cFF808080"
 
 -- Addon state
-FuldStonks.version = "0.1.0"
+FuldStonks.version = "0.2.0"
 FuldStonks.frame = nil
-FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, betCount = 0 }
+FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, stateVersion = 0, nonce = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
 FuldStonks.syncRequested = false
-FuldStonks.heartbeatTicker = nil  -- Store heartbeat ticker for cleanup
+FuldStonks.syncTicker = nil     -- Store state sync ticker for cleanup (replaces heartbeat)
 FuldStonks.rosterUpdateTimer = nil  -- Debounce timer for roster updates
 FuldStonks.betIdCounter = 0      -- Counter for generating unique bet IDs
 FuldStonks.pendingBets = {}      -- Track pending bets awaiting gold trade: {betId, option, amount}
+FuldStonks.pendingStateUpdates = {}  -- Queue for state updates to be applied
 
 -- Event frame for initialization
 local eventFrame = CreateFrame("Frame")
@@ -1206,15 +1209,10 @@ SlashCmdList["FULDSTONKS"] = SlashCommandHandler
 -- Addon message prefix for communication between players
 local MESSAGE_PREFIX = "FuldStonks"
 
--- Message types
-local MSG_HEARTBEAT = "HB"      -- Periodic heartbeat to announce presence
-local MSG_SYNC_REQUEST = "SYNCREQ"  -- Request full state sync
-local MSG_SYNC_RESPONSE = "SYNCRSP" -- Response with full state
-local MSG_BET_CREATED = "BETCRT"    -- New bet created
-local MSG_BET_PLACED = "BETPLC"     -- Bet placement
-local MSG_BET_RESOLVED = "BETRSV"   -- Bet resolved
-local MSG_BET_CANCELLED = "BETCNL"  -- Bet cancelled
-local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator)
+-- Message types (State-based sync model)
+local MSG_STATE_SYNC = "STATESYNC"  -- Full state broadcast (sent every 5s)
+local MSG_SYNC_REQUEST = "SYNCREQ"  -- Request full state sync on demand
+local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator immediately)
 
 -- Determine the best channel to send messages
 local function GetBroadcastChannel()
@@ -1249,16 +1247,246 @@ local function DeserializeMessage(message)
     return msgType, unpack(parts, 2)
 end
 
--- Send addon message with rate limiting
-function FuldStonks:BroadcastMessage(msgType, ...)
-    local now = GetTime()
-    
-    -- Rate limit: max 1 message per second (except sync responses and bet placements)
-    if msgType ~= MSG_SYNC_RESPONSE and msgType ~= MSG_BET_PLACED and (now - self.lastBroadcast) < 1.0 then
-        DebugPrint("Rate limited: " .. msgType)
-        return false
+-- ============================================
+-- STATE SYNCHRONIZATION SYSTEM
+-- ============================================
+
+-- Increment Lamport clock for state versioning
+local function IncrementStateVersion()
+    FuldStonksDB.stateVersion = (FuldStonksDB.stateVersion or 0) + 1
+    DebugPrint("State version incremented to: " .. FuldStonksDB.stateVersion)
+    return FuldStonksDB.stateVersion
+end
+
+-- Update Lamport clock when receiving a message
+local function UpdateStateVersion(receivedVersion)
+    local currentVersion = FuldStonksDB.stateVersion or 0
+    FuldStonksDB.stateVersion = math.max(currentVersion, receivedVersion) + 1
+    DebugPrint("State version updated to: " .. FuldStonksDB.stateVersion .. " (received: " .. receivedVersion .. ")")
+end
+
+-- Serialize a single bet for transmission
+local function SerializeBetForSync(bet)
+    -- Format: id^title^betType^options^createdBy^timestamp^status^totalPot^stateVersion
+    local options = table.concat(bet.options, ",")
+    local parts = {
+        bet.id,
+        bet.title,
+        bet.betType,
+        options,
+        bet.createdBy,
+        tostring(bet.timestamp),
+        bet.status or "active",
+        tostring(bet.totalPot or 0),
+        tostring(bet.stateVersion or 0)
+    }
+    return table.concat(parts, "^")
+end
+
+-- Deserialize a bet from sync message
+local function DeserializeBetFromSync(betString)
+    local parts = {strsplit("^", betString)}
+    if #parts < 9 then 
+        DebugPrint("Invalid bet string, not enough parts: " .. #parts)
+        return nil 
     end
     
+    local bet = {
+        id = parts[1],
+        title = parts[2],
+        betType = parts[3],
+        options = {strsplit(",", parts[4])},
+        createdBy = parts[5],
+        timestamp = tonumber(parts[6]) or 0,
+        status = parts[7],
+        totalPot = tonumber(parts[8]) or 0,
+        stateVersion = tonumber(parts[9]) or 0,
+        participants = {},
+        pendingTrades = {}
+    }
+    return bet
+end
+
+-- Serialize a participant entry
+local function SerializeParticipant(playerName, participation)
+    -- Format: playerName~option~amount~confirmed~timestamp
+    return playerName .. "~" .. participation.option .. "~" .. tostring(participation.amount) .. "~" .. 
+           tostring(participation.confirmed or true) .. "~" .. tostring(participation.timestamp or GetTime())
+end
+
+-- Deserialize a participant entry
+local function DeserializeParticipant(participantString)
+    local parts = {strsplit("~", participantString)}
+    if #parts < 5 then return nil end
+    
+    return parts[1], {
+        option = parts[2],
+        amount = tonumber(parts[3]) or 0,
+        confirmed = (parts[4] == "true"),
+        timestamp = tonumber(parts[5]) or 0
+    }
+end
+
+-- Create a snapshot of current addon state
+function FuldStonks:CreateStateSnapshot()
+    local snapshot = {
+        version = FuldStonksDB.stateVersion or 0,
+        nonce = (FuldStonksDB.syncNonce or 0) + 1,
+        timestamp = GetTime(),
+        bets = {},
+        participants = {}  -- Separate participant data
+    }
+    
+    FuldStonksDB.syncNonce = snapshot.nonce
+    
+    -- Collect all active bets
+    for betId, bet in pairs(FuldStonksDB.activeBets) do
+        if bet.status == "active" then
+            table.insert(snapshot.bets, {
+                id = betId,
+                data = SerializeBetForSync(bet)
+            })
+            
+            -- Collect participants for this bet
+            for playerName, participation in pairs(bet.participants or {}) do
+                table.insert(snapshot.participants, {
+                    betId = betId,
+                    data = SerializeParticipant(playerName, participation)
+                })
+            end
+        end
+    end
+    
+    return snapshot
+end
+
+-- Broadcast full state sync
+function FuldStonks:BroadcastStateSync()
+    local snapshot = self:CreateStateSnapshot()
+    
+    -- Send bet data in chunks (WoW has 255 char limit per message)
+    -- Format: STATESYNC|version|nonce|betCount|participantCount
+    local header = SerializeMessage(MSG_STATE_SYNC, "HEADER", snapshot.version, snapshot.nonce, #snapshot.bets, #snapshot.participants)
+    
+    if #header <= 255 then
+        C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, header, GetBroadcastChannel())
+        DebugPrint("Sent state sync header: v" .. snapshot.version .. " nonce:" .. snapshot.nonce .. " bets:" .. #snapshot.bets .. " participants:" .. #snapshot.participants)
+    end
+    
+    -- Send each bet
+    for i, betData in ipairs(snapshot.bets) do
+        local betMsg = SerializeMessage(MSG_STATE_SYNC, "BET", snapshot.nonce, i, betData.id, betData.data)
+        if #betMsg <= 255 then
+            C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, betMsg, GetBroadcastChannel())
+        else
+            DebugPrint("Bet message too long (" .. #betMsg .. " chars), skipping: " .. betData.id)
+        end
+    end
+    
+    -- Send participant data
+    for i, participantData in ipairs(snapshot.participants) do
+        local partMsg = SerializeMessage(MSG_STATE_SYNC, "PARTICIPANT", snapshot.nonce, i, participantData.betId, participantData.data)
+        if #partMsg <= 255 then
+            C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, partMsg, GetBroadcastChannel())
+        else
+            DebugPrint("Participant message too long, skipping")
+        end
+    end
+    
+    self.lastBroadcast = GetTime()
+end
+
+-- Merge received state with local state
+function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion, sender)
+    local changesMade = false
+    local conflicts = 0
+    
+    -- Update our Lamport clock
+    UpdateStateVersion(senderVersion)
+    
+    DebugPrint("Merging state from " .. sender .. " (v" .. senderVersion .. ")")
+    
+    -- Process each received bet
+    for betId, receivedBet in pairs(receivedBets) do
+        local localBet = FuldStonksDB.activeBets[betId]
+        
+        if not localBet then
+            -- New bet we don't have - accept it
+            FuldStonksDB.activeBets[betId] = receivedBet
+            changesMade = true
+            DebugPrint("  Added new bet: " .. betId)
+            
+            local creatorName = GetPlayerBaseName(receivedBet.createdBy)
+            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " created bet: " .. receivedBet.title)
+            
+        elseif receivedBet.stateVersion > (localBet.stateVersion or 0) then
+            -- Received bet is newer - update it
+            -- Preserve local participants if they're newer
+            local localParticipants = localBet.participants
+            FuldStonksDB.activeBets[betId] = receivedBet
+            
+            -- Merge participants (will be handled separately)
+            receivedBet.participants = localParticipants or {}
+            
+            changesMade = true
+            DebugPrint("  Updated bet: " .. betId .. " (v" .. receivedBet.stateVersion .. " > v" .. (localBet.stateVersion or 0) .. ")")
+            
+        elseif receivedBet.stateVersion == (localBet.stateVersion or 0) then
+            -- Same version - use tie-breaker (creator name lexicographically)
+            if receivedBet.createdBy < localBet.createdBy then
+                FuldStonksDB.activeBets[betId] = receivedBet
+                conflicts = conflicts + 1
+                changesMade = true
+                DebugPrint("  Conflict resolved for bet: " .. betId .. " (chose " .. receivedBet.createdBy .. "'s version)")
+            end
+        end
+        -- else: local bet is newer, keep it
+    end
+    
+    -- Process participants
+    for betId, participants in pairs(receivedParticipants) do
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet then
+            for playerName, participation in pairs(participants) do
+                local localParticipation = bet.participants[playerName]
+                
+                if not localParticipation then
+                    -- New participant
+                    bet.participants[playerName] = participation
+                    bet.totalPot = (bet.totalPot or 0) + participation.amount
+                    changesMade = true
+                    
+                    local baseName = GetPlayerBaseName(playerName)
+                    if not FuldStonksDB.ignoredBets[betId] then
+                        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " bet " .. participation.amount .. "g on " .. COLOR_YELLOW .. participation.option .. COLOR_RESET .. " | Pot now: " .. bet.totalPot .. "g")
+                    end
+                    
+                elseif (participation.timestamp or 0) > (localParticipation.timestamp or 0) then
+                    -- Received participant data is newer
+                    local oldAmount = localParticipation.amount
+                    bet.participants[playerName] = participation
+                    bet.totalPot = (bet.totalPot or 0) - oldAmount + participation.amount
+                    changesMade = true
+                    DebugPrint("  Updated participant: " .. playerName .. " in bet " .. betId)
+                end
+            end
+        end
+    end
+    
+    if conflicts > 0 then
+        DebugPrint("Resolved " .. conflicts .. " conflicts during merge")
+    end
+    
+    -- Update UI if changes were made
+    if changesMade and self.frame and self.frame:IsShown() then
+        self.frame:UpdateBetList()
+    end
+    
+    return changesMade
+end
+
+-- Send addon message (simplified for state-based sync)
+function FuldStonks:BroadcastMessage(msgType, ...)
     local channel = GetBroadcastChannel()
     local message = SerializeMessage(msgType, ...)
     
@@ -1269,10 +1497,7 @@ function FuldStonks:BroadcastMessage(msgType, ...)
     end
     
     C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, message, channel)
-    self.lastBroadcast = now
-    if msgType ~= MSG_HEARTBEAT then
-        DebugPrint("Sent " .. msgType .. " to " .. channel .. ": " .. message)
-    end
+    DebugPrint("Sent " .. msgType .. " to " .. channel)
     return true
 end
 
@@ -1283,34 +1508,11 @@ local function InitializeAddonComms()
     DebugPrint("Addon message prefix registered: " .. MESSAGE_PREFIX)
 end
 
--- Send heartbeat to announce presence
-function FuldStonks:SendHeartbeat()
-    local activeBetCount = 0
-    if FuldStonksDB.activeBets then
-        for _ in pairs(FuldStonksDB.activeBets) do
-            activeBetCount = activeBetCount + 1
-        end
-    end
-    self:BroadcastMessage(MSG_HEARTBEAT, self.version, activeBetCount)
-end
-
--- Request full sync from other players
+-- Request full sync from other players (on-demand)
 function FuldStonks:RequestSync()
     self:BroadcastMessage(MSG_SYNC_REQUEST)
     self.syncRequested = true
-end
-
--- Send sync response with current state
-function FuldStonks:SendSyncResponse(target)
-    -- For now, just send basic info
-    -- In future, this will include active bets
-    local activeBetCount = 0
-    if FuldStonksDB.activeBets then
-        for _ in pairs(FuldStonksDB.activeBets) do
-            activeBetCount = activeBetCount + 1
-        end
-    end
-    self:BroadcastMessage(MSG_SYNC_RESPONSE, activeBetCount)
+    DebugPrint("Sync requested from peers")
 end
 
 -- Handle received addon messages
@@ -1324,200 +1526,101 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         return
     end
     
-    local msgType = strsplit(DELIMITER, message)
-    if msgType ~= MSG_HEARTBEAT then
-        DebugPrint("Received from " .. sender .. " [" .. channel .. "]: " .. message)
-    end
-    
-    local msgType, arg1, arg2, arg3 = DeserializeMessage(message)
+    local msgType, arg1, arg2, arg3, arg4, arg5 = DeserializeMessage(message)
     local now = GetTime()
+    
+    DebugPrint("Received " .. msgType .. " from " .. sender .. " [" .. channel .. "]")
     
     -- Update peer tracking
     if not FuldStonks.peers[sender] then
-        FuldStonks.peers[sender] = {}
-        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. sender .. " connected!")
+        FuldStonks.peers[sender] = {
+            lastSeen = now,
+            stateVersion = 0,
+            nonce = 0
+        }
+        local baseName = GetPlayerBaseName(sender)
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " connected!")
     end
     FuldStonks.peers[sender].lastSeen = now
     
     -- Handle different message types
-    if msgType == MSG_HEARTBEAT then
-        local peerVersion = arg1 or "unknown"
-        local peerBetCount = tonumber(arg2) or 0
-        FuldStonks.peers[sender].version = peerVersion
-        FuldStonks.peers[sender].betCount = peerBetCount
+    if msgType == MSG_STATE_SYNC then
+        local syncType = arg1  -- HEADER, BET, or PARTICIPANT
+        
+        if syncType == "HEADER" then
+            -- State sync header: version, nonce, betCount, participantCount
+            local version = tonumber(arg2) or 0
+            local nonce = tonumber(arg3) or 0
+            local betCount = tonumber(arg4) or 0
+            local participantCount = tonumber(arg5) or 0
+            
+            FuldStonks.peers[sender].stateVersion = version
+            FuldStonks.peers[sender].nonce = nonce
+            
+            -- Initialize pending state update for this nonce
+            if not FuldStonks.pendingStateUpdates[sender] then
+                FuldStonks.pendingStateUpdates[sender] = {}
+            end
+            
+            FuldStonks.pendingStateUpdates[sender][nonce] = {
+                version = version,
+                expectedBets = betCount,
+                expectedParticipants = participantCount,
+                receivedBets = {},
+                receivedParticipants = {},
+                timestamp = now
+            }
+            
+            DebugPrint("State sync started from " .. sender .. ": v" .. version .. " nonce:" .. nonce .. " expecting " .. betCount .. " bets, " .. participantCount .. " participants")
+            
+        elseif syncType == "BET" then
+            -- Bet data: nonce, index, betId, serializedBet
+            local nonce = tonumber(arg2) or 0
+            local index = tonumber(arg3) or 0
+            local betId = arg4
+            local betData = arg5
+            
+            if FuldStonks.pendingStateUpdates[sender] and FuldStonks.pendingStateUpdates[sender][nonce] then
+                local bet = DeserializeBetFromSync(betData)
+                if bet then
+                    FuldStonks.pendingStateUpdates[sender][nonce].receivedBets[betId] = bet
+                    DebugPrint("  Received bet " .. index .. "/" .. FuldStonks.pendingStateUpdates[sender][nonce].expectedBets .. ": " .. betId)
+                    
+                    -- Check if we've received all expected data
+                    FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
+                end
+            end
+            
+        elseif syncType == "PARTICIPANT" then
+            -- Participant data: nonce, index, betId, serializedParticipant
+            local nonce = tonumber(arg2) or 0
+            local index = tonumber(arg3) or 0
+            local betId = arg4
+            local participantData = arg5
+            
+            if FuldStonks.pendingStateUpdates[sender] and FuldStonks.pendingStateUpdates[sender][nonce] then
+                local playerName, participation = DeserializeParticipant(participantData)
+                if playerName and participation then
+                    if not FuldStonks.pendingStateUpdates[sender][nonce].receivedParticipants[betId] then
+                        FuldStonks.pendingStateUpdates[sender][nonce].receivedParticipants[betId] = {}
+                    end
+                    FuldStonks.pendingStateUpdates[sender][nonce].receivedParticipants[betId][playerName] = participation
+                    DebugPrint("  Received participant " .. index .. "/" .. FuldStonks.pendingStateUpdates[sender][nonce].expectedParticipants .. " for bet " .. betId)
+                    
+                    -- Check if we've received all expected data
+                    FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
+                end
+            end
+        end
         
     elseif msgType == MSG_SYNC_REQUEST then
         DebugPrint(sender .. " requested sync")
-        -- Send our current state
-        FuldStonks:SendSyncResponse(sender)
-        
-    elseif msgType == MSG_SYNC_RESPONSE then
-        local betCount = tonumber(arg1) or 0
-        DebugPrint(sender .. " sync response: " .. betCount .. " bets")
-        FuldStonks.peers[sender].betCount = betCount
-        
-    elseif msgType == MSG_BET_CREATED then
-        -- Handle bet creation from peer
-        local betString = arg1
-        if betString then
-            local bet = DeserializeBet(betString)
-            if bet and not FuldStonksDB.activeBets[bet.id] then
-                FuldStonksDB.activeBets[bet.id] = bet
-                local creatorName = GetPlayerBaseName(sender)
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " created bet: " .. bet.title)
-                DebugPrint("Received " .. bet.title .. " bet from " .. sender)
-                
-                -- Update UI if open
-                if FuldStonks.frame and FuldStonks.frame:IsShown() then
-                    FuldStonks.frame:UpdateBetList()
-                end
-            end
-        end
-        
-    elseif msgType == MSG_BET_PLACED then
-        -- Handle bet placement from peer
-        local betId = arg1
-        local playerName = arg2
-        local option = arg3
-        local amount = tonumber(arg4) or 0
-        
-        local bet = FuldStonksDB.activeBets[betId]
-        if bet then
-            -- Update or add participant (handle existing bets properly)
-            local oldAmount = 0
-            if bet.participants[playerName] then
-                oldAmount = bet.participants[playerName].amount or 0
-            end
-            
-            bet.participants[playerName] = {
-                option = option,
-                amount = amount
-            }
-            bet.totalPot = bet.totalPot - oldAmount + amount
-            
-            local baseName = GetPlayerBaseName(playerName)
-            DebugPrint("Received bet placement from " .. sender .. ": " .. baseName .. " bet " .. amount .. "g on " .. option)
-            
-            -- Notify user about pot changes for all non-hidden bets
-            if not FuldStonksDB.ignoredBets[betId] then
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " bet " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET .. " | Pot now: " .. bet.totalPot .. "g")
-                print("  Bet: " .. bet.title)
-            end
-            
-            -- Clear pending bet if this is our bet being confirmed
-            if playerName == playerFullName and FuldStonks.pendingBets[playerFullName] then
-                if FuldStonks.pendingBets[playerFullName].betId == betId then
-                    FuldStonks.pendingBets[playerFullName] = nil
-                    DebugPrint("Cleared pending bet for self after confirmation")
-                end
-            end
-            
-            -- Update UI if frame exists
-            if FuldStonks.frame then
-                FuldStonks.frame:UpdateBetList()
-            end
-            
-            -- Update inspect dialog if it's showing this bet
-            if FuldStonks.inspectDialog and FuldStonks.inspectDialog:IsShown() and FuldStonks.inspectDialog.currentBetId == betId then
-                FuldStonks:ShowBetInspectDialog(betId)
-            end
-        end
-        
-    elseif msgType == MSG_BET_CANCELLED then
-        -- Handle bet cancellation from peer
-        local betId = arg1
-        
-        local bet = FuldStonksDB.activeBets[betId]
-        if bet then
-            local creatorName = GetPlayerBaseName(sender)
-            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " cancelled bet: " .. bet.title)
-            
-            -- Return bets to participants
-            if next(bet.participants) then
-                print("  Returned:")
-                for playerName, participation in pairs(bet.participants) do
-                    print("    " .. GetPlayerBaseName(playerName) .. ": " .. participation.amount .. "g")
-                end
-            end
-            
-            -- Mark as cancelled and move to history
-            bet.status = "cancelled"
-            bet.cancelledAt = GetTime()
-            
-            FuldStonksDB.betHistory[betId] = bet
-            FuldStonksDB.activeBets[betId] = nil
-            
-            -- Clear any pending bets for this bet
-            for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
-                if pendingBet.betId == betId then
-                    FuldStonks.pendingBets[playerName] = nil
-                end
-            end
-            
-            DebugPrint("Received bet cancellation from " .. sender)
-            
-            -- Update UI if open
-            if FuldStonks.frame and FuldStonks.frame:IsShown() then
-                FuldStonks.frame:UpdateBetList()
-            end
-            
-            -- Close inspect dialog if it's showing this bet
-            if FuldStonks.inspectDialog and FuldStonks.inspectDialog:IsShown() and FuldStonks.inspectDialog.currentBetId == betId then
-                FuldStonks.inspectDialog:Hide()
-            end
-        end
-        
-    elseif msgType == MSG_BET_RESOLVED then
-        -- Handle bet resolution from peer
-        local betId = arg1
-        local winningOption = arg2
-        
-        local bet = FuldStonksDB.activeBets[betId]
-        if bet then
-            -- Calculate winners
-            local totalWinningBets = 0
-            local winners = {}
-            
-            for playerName, participation in pairs(bet.participants) do
-                if participation.option == winningOption then
-                    totalWinningBets = totalWinningBets + participation.amount
-                    table.insert(winners, {name = playerName, amount = participation.amount})
-                end
-            end
-            
-            local creatorName = GetPlayerBaseName(sender)
-            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " resolved bet: " .. bet.title)
-            print("  Winning option: " .. COLOR_YELLOW .. winningOption .. COLOR_RESET)
-            
-            if totalWinningBets == 0 then
-                print("  No winners! Bets returned.")
-            else
-                print("  Winners:")
-                for _, winner in ipairs(winners) do
-                    local share = (winner.amount / totalWinningBets) * bet.totalPot
-                    local profit = share - winner.amount
-                    print("    " .. GetPlayerBaseName(winner.name) .. ": " .. math.floor(share) .. "g (+" .. math.floor(profit) .. "g)")
-                end
-            end
-            
-            -- Mark as resolved and move to history
-            bet.status = "resolved"
-            bet.winningOption = winningOption
-            bet.resolvedAt = GetTime()
-            
-            FuldStonksDB.betHistory[betId] = bet
-            FuldStonksDB.activeBets[betId] = nil
-            
-            DebugPrint("Received bet resolution from " .. sender)
-            
-            -- Update UI if open
-            if FuldStonks.frame and FuldStonks.frame:IsShown() then
-                FuldStonks.frame:UpdateBetList()
-            end
-        end
+        -- Send our current state immediately
+        FuldStonks:BroadcastStateSync()
         
     elseif msgType == MSG_BET_PENDING then
         -- Handle pending bet notification (received by bet creator)
+        -- This still sends immediately for better UX
         local betId = arg1
         local option = arg2
         local amount = tonumber(arg3) or 0
@@ -1546,6 +1649,46 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         
     else
         DebugPrint("Unknown message type: " .. tostring(msgType))
+    end
+end
+
+-- Check if we've received complete state update and apply it
+function FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
+    local update = self.pendingStateUpdates[sender] and self.pendingStateUpdates[sender][nonce]
+    if not update then return end
+    
+    local receivedBetCount = 0
+    for _ in pairs(update.receivedBets) do
+        receivedBetCount = receivedBetCount + 1
+    end
+    
+    local receivedParticipantCount = 0
+    for _, participants in pairs(update.receivedParticipants) do
+        for _ in pairs(participants) do
+            receivedParticipantCount = receivedParticipantCount + 1
+        end
+    end
+    
+    -- Check if we have all the data
+    if receivedBetCount >= update.expectedBets and receivedParticipantCount >= update.expectedParticipants then
+        DebugPrint("Complete state received from " .. sender .. " (nonce:" .. nonce .. "), applying...")
+        
+        -- Apply the state update
+        self:MergeState(update.receivedBets, update.receivedParticipants, update.version, sender)
+        
+        -- Clean up
+        self.pendingStateUpdates[sender][nonce] = nil
+        
+        -- Clean up old pending updates (older than 30 seconds)
+        local now = GetTime()
+        for peerName, nonces in pairs(self.pendingStateUpdates) do
+            for n, upd in pairs(nonces) do
+                if now - upd.timestamp > 30 then
+                    DebugPrint("Cleaned up stale state update from " .. peerName .. " nonce:" .. n)
+                    self.pendingStateUpdates[peerName][n] = nil
+                end
+            end
+        end
     end
 end
 
@@ -1750,12 +1893,25 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 FuldStonksDB.debug = false
             end
             
-            -- Start heartbeat timer (every 30 seconds)
-            if FuldStonks.heartbeatTicker then
-                FuldStonks.heartbeatTicker:Cancel()
+            -- Initialize state versioning
+            if not FuldStonksDB.stateVersion then
+                FuldStonksDB.stateVersion = 0
             end
-            FuldStonks.heartbeatTicker = C_Timer.NewTicker(30, function()
-                FuldStonks:SendHeartbeat()
+            if not FuldStonksDB.syncNonce then
+                FuldStonksDB.syncNonce = 0
+            end
+            
+            -- Start state sync timer (every 5 seconds)
+            if FuldStonks.syncTicker then
+                FuldStonks.syncTicker:Cancel()
+            end
+            FuldStonks.syncTicker = C_Timer.NewTicker(5, function()
+                FuldStonks:BroadcastStateSync()
+            end)
+            
+            -- Send initial state sync after a short delay
+            C_Timer.After(2.0, function()
+                FuldStonks:BroadcastStateSync()
             end)
         end
     elseif event == "CHAT_MSG_ADDON" then
@@ -1766,20 +1922,20 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             FuldStonks.rosterUpdateTimer:Cancel()
         end
         FuldStonks.rosterUpdateTimer = C_Timer.NewTimer(1.5, function()
-            FuldStonks:SendHeartbeat()
+            FuldStonks:BroadcastStateSync()  -- Sync state on roster change
             FuldStonks.rosterUpdateTimer = nil
         end)
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Entering world/instance, request sync
+        -- Entering world/instance, request sync and broadcast our state
         C_Timer.After(2.0, function()
-            FuldStonks:SendHeartbeat()
+            FuldStonks:BroadcastStateSync()
             FuldStonks:RequestSync()
         end)
     elseif event == "PLAYER_LOGOUT" then
         -- Clean up timers on logout
-        if FuldStonks.heartbeatTicker then
-            FuldStonks.heartbeatTicker:Cancel()
-            FuldStonks.heartbeatTicker = nil
+        if FuldStonks.syncTicker then
+            FuldStonks.syncTicker:Cancel()
+            FuldStonks.syncTicker = nil
         end
         if FuldStonks.rosterUpdateTimer then
             FuldStonks.rosterUpdateTimer:Cancel()
@@ -1816,6 +1972,9 @@ function FuldStonks:CreateBet(betData)
     -- Generate unique bet ID
     local betId = GenerateBetId()
     
+    -- Increment state version
+    local stateVersion = IncrementStateVersion()
+    
     -- Create bet object
     local bet = {
         id = betId,
@@ -1827,18 +1986,18 @@ function FuldStonks:CreateBet(betData)
         participants = {},
         totalPot = 0,
         status = "active",
+        stateVersion = stateVersion,
         pendingTrades = {}  -- Track pending gold trades
     }
     
     -- Add to active bets
     FuldStonksDB.activeBets[betId] = bet
     
-    -- Broadcast to other players
-    local serialized = SerializeBet(bet)
-    self:BroadcastMessage(MSG_BET_CREATED, serialized)
-    
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet created: " .. bet.title)
-    DebugPrint("Created bet: " .. betId)
+    DebugPrint("Created bet: " .. betId .. " (v" .. stateVersion .. ")")
+    
+    -- State will be broadcast in next sync cycle (every 5s)
+    -- No need to immediately broadcast
     
     -- Force UI update if frame exists
     if self.frame then
@@ -1956,6 +2115,9 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
         return
     end
     
+    -- Increment state version for this change
+    IncrementStateVersion()
+    
     -- Record bet placement (handle bet changes by subtracting old amount)
     local oldAmount = 0
     if bet.participants[playerName] then
@@ -1965,13 +2127,12 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
     bet.participants[playerName] = {
         option = option,
         amount = amount,
-        confirmed = true
+        confirmed = true,
+        timestamp = GetTime()  -- Add timestamp for conflict resolution
     }
     
     bet.totalPot = bet.totalPot - oldAmount + amount
-    
-    -- Broadcast to other players
-    self:BroadcastMessage(MSG_BET_PLACED, betId, playerName, option, amount)
+    bet.stateVersion = FuldStonksDB.stateVersion  -- Update bet's state version
     
     -- Whisper confirmation to the player
     local betTitle = bet.title
@@ -1979,7 +2140,9 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
     SendChatMessage(confirmMsg, "WHISPER", nil, playerName)
     
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Confirmed " .. GetPlayerBaseName(playerName) .. "'s bet: " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET)
-    DebugPrint("Confirmed bet: " .. betId .. " | " .. playerName .. " | " .. option .. " | " .. amount .. "g")
+    DebugPrint("Confirmed bet: " .. betId .. " | " .. playerName .. " | " .. option .. " | " .. amount .. "g (v" .. FuldStonksDB.stateVersion .. ")")
+    
+    -- State will be broadcast in next sync cycle
     
     -- Update UI if open
     if self.frame and self.frame:IsShown() then
@@ -2037,6 +2200,9 @@ function FuldStonks:CancelBet(betId)
         return
     end
     
+    -- Increment state version
+    IncrementStateVersion()
+    
     print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet cancelled! Returning all bets...")
     print("  Bet: " .. bet.title)
     
@@ -2053,6 +2219,7 @@ function FuldStonks:CancelBet(betId)
     -- Mark as cancelled and move to history
     bet.status = "cancelled"
     bet.cancelledAt = GetTime()
+    bet.stateVersion = FuldStonksDB.stateVersion
     
     FuldStonksDB.betHistory[betId] = bet
     FuldStonksDB.activeBets[betId] = nil
@@ -2064,8 +2231,7 @@ function FuldStonks:CancelBet(betId)
         end
     end
     
-    -- Broadcast cancellation
-    self:BroadcastMessage(MSG_BET_CANCELLED, betId)
+    -- State will be broadcast in next sync cycle (bet removal)
     
     -- Update UI if open
     if self.frame and self.frame:IsShown() then
@@ -2087,6 +2253,9 @@ function FuldStonks:ResolveBet(betId, winningOption)
         print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Error: Bet not found!")
         return
     end
+    
+    -- Increment state version
+    IncrementStateVersion()
     
     -- Calculate winners and payouts
     local totalWinningBets = 0
@@ -2119,12 +2288,12 @@ function FuldStonks:ResolveBet(betId, winningOption)
     bet.status = "resolved"
     bet.winningOption = winningOption
     bet.resolvedAt = GetTime()
+    bet.stateVersion = FuldStonksDB.stateVersion
     
     FuldStonksDB.betHistory[betId] = bet
     FuldStonksDB.activeBets[betId] = nil
     
-    -- Broadcast resolution
-    self:BroadcastMessage(MSG_BET_RESOLVED, betId, winningOption)
+    -- State will be broadcast in next sync cycle (bet removal)
     
     -- Whisper all participants about their result
     if totalWinningBets == 0 then
