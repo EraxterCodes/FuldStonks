@@ -9,7 +9,8 @@ local ADDON_NAME, FuldStonks = ...
 FuldStonksDB = FuldStonksDB or {
     activeBets = {},      -- Active bets in the system
     myBets = {},          -- Bets I've placed
-    betHistory = {}       -- Historical bets
+    betHistory = {},      -- Historical bets
+    ignoredBets = {}      -- Bets hidden from view
 }
 
 -- Constants
@@ -45,7 +46,19 @@ local function DebugPrint(msg)
     end
 end
 
-
+-- Static popup for confirming bet cancellation
+StaticPopupDialogs["FULDSTONKS_CONFIRM_CANCEL"] = {
+    text = "Cancel this bet and return all gold to participants?",
+    button1 = "Yes",
+    button2 = "No",
+    OnAccept = function(self, betId)
+        FuldStonks:CancelBet(betId)
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
 
 -- Helper function to extract base name (remove realm suffix)
 -- Handles hyphenated names correctly: "Mary-Jane-Stormrage" -> "Mary-Jane"
@@ -153,7 +166,7 @@ local function CreateMainFrame()
         
         -- Display active bets
         for betId, bet in pairs(FuldStonksDB.activeBets) do
-            if bet.status == "active" then
+            if bet.status == "active" and not FuldStonksDB.ignoredBets[betId] then
                 local betFrame = CreateFrame("Frame", nil, self.betListContent, "BackdropTemplate")
                 betFrame:SetSize(520, 80)
                 betFrame:SetPoint("TOPLEFT", self.betListContent, "TOPLEFT", 0, -yOffset)
@@ -171,7 +184,17 @@ local function CreateMainFrame()
                 title:SetPoint("TOPLEFT", betFrame, "TOPLEFT", 10, -8)
                 title:SetText(bet.title)
                 title:SetJustifyH("LEFT")
-                title:SetWidth(500)
+                title:SetWidth(450)
+                
+                -- Hide button on the right
+                local hideButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                hideButton:SetSize(50, 20)
+                hideButton:SetPoint("TOPRIGHT", betFrame, "TOPRIGHT", -8, -8)
+                hideButton:SetText("Hide")
+                hideButton:SetScript("OnClick", function()
+                    FuldStonks:HideBet(betId)
+                    self:UpdateBetList()
+                end)
                 
                 -- Bet info
                 local creatorName = GetPlayerBaseName(bet.createdBy)
@@ -660,6 +683,170 @@ function FuldStonks:ShowBetSelectionDialog()
     print("Use: /fs resolve (from UI click Resolve button on the specific bet)")
 end
 
+-- Show payout dialog
+function FuldStonks:ShowPayoutDialog(betId, winningOption)
+    local bet = FuldStonksDB.betHistory[betId] or FuldStonksDB.activeBets[betId]
+    if not bet then
+        return
+    end
+    
+    -- Create dialog if it doesn't exist
+    if not self.payoutDialog then
+        local dialog = CreateFrame("Frame", "FuldStonksPayoutDialog", UIParent, "BasicFrameTemplateWithInset")
+        dialog:SetSize(500, 450)
+        dialog:SetPoint("CENTER")
+        dialog:SetMovable(true)
+        dialog:EnableMouse(true)
+        dialog:RegisterForDrag("LeftButton")
+        dialog:SetScript("OnDragStart", dialog.StartMoving)
+        dialog:SetScript("OnDragStop", dialog.StopMovingOrSizing)
+        dialog:SetFrameStrata("DIALOG")
+        dialog:Hide()
+        
+        dialog.title = dialog:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        dialog.title:SetPoint("TOP", dialog.TitleBg, "TOP", 0, -3)
+        dialog.title:SetText("Payout Summary")
+        
+        dialog.betTitle = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        dialog.betTitle:SetPoint("TOP", dialog, "TOP", 0, -35)
+        dialog.betTitle:SetWidth(460)
+        dialog.betTitle:SetJustifyH("CENTER")
+        
+        dialog.resultText = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.resultText:SetPoint("TOP", dialog.betTitle, "BOTTOM", 0, -10)
+        dialog.resultText:SetWidth(460)
+        dialog.resultText:SetJustifyH("CENTER")
+        
+        -- Scrollable payout list
+        dialog.scrollFrame = CreateFrame("ScrollFrame", nil, dialog, "UIPanelScrollFrameTemplate")
+        dialog.scrollFrame:SetPoint("TOPLEFT", dialog.resultText, "BOTTOMLEFT", 0, -15)
+        dialog.scrollFrame:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -30, 50)
+        
+        dialog.scrollContent = CreateFrame("Frame", nil, dialog.scrollFrame)
+        dialog.scrollContent:SetSize(440, 1)
+        dialog.scrollFrame:SetScrollChild(dialog.scrollContent)
+        
+        dialog.payoutText = dialog.scrollContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        dialog.payoutText:SetPoint("TOPLEFT", dialog.scrollContent, "TOPLEFT", 0, 0)
+        dialog.payoutText:SetWidth(440)
+        dialog.payoutText:SetJustifyH("LEFT")
+        
+        -- Close button
+        dialog.closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+        dialog.closeButton:SetSize(100, 25)
+        dialog.closeButton:SetPoint("BOTTOM", dialog, "BOTTOM", 0, 15)
+        dialog.closeButton:SetText("Close")
+        dialog.closeButton:SetScript("OnClick", function()
+            dialog:Hide()
+        end)
+        
+        dialog.CloseButton:SetScript("OnClick", function()
+            dialog:Hide()
+        end)
+        
+        self.payoutDialog = dialog
+    end
+    
+    -- Set bet info
+    self.payoutDialog.betTitle:SetText(COLOR_YELLOW .. bet.title .. COLOR_RESET)
+    
+    local payoutInfo = ""
+    
+    if bet.status == "cancelled" then
+        -- Cancelled bet - return all money
+        self.payoutDialog.resultText:SetText(COLOR_YELLOW .. "BET CANCELLED - Return All Gold" .. COLOR_RESET)
+        
+        payoutInfo = COLOR_ORANGE .. "Return the following amounts to each participant:\n\n" .. COLOR_RESET
+        
+        if next(bet.participants) then
+            local sortedParticipants = {}
+            for playerName, participation in pairs(bet.participants) do
+                table.insert(sortedParticipants, {name = playerName, amount = participation.amount, option = participation.option})
+            end
+            table.sort(sortedParticipants, function(a, b) return a.amount > b.amount end)
+            
+            for _, p in ipairs(sortedParticipants) do
+                local baseName = GetPlayerBaseName(p.name)
+                payoutInfo = payoutInfo .. COLOR_GREEN .. baseName .. COLOR_RESET .. "\n"
+                payoutInfo = payoutInfo .. "  Return: " .. COLOR_YELLOW .. p.amount .. "g" .. COLOR_RESET .. " (originally bet on " .. p.option .. ")\n\n"
+            end
+        else
+            payoutInfo = COLOR_GRAY .. "No participants to refund." .. COLOR_RESET
+        end
+        
+    elseif bet.status == "resolved" and winningOption then
+        -- Resolved bet - calculate payouts
+        self.payoutDialog.resultText:SetText(COLOR_GREEN .. winningOption .. " WINS!" .. COLOR_RESET)
+        
+        -- Calculate winners
+        local totalWinningBets = 0
+        local winners = {}
+        local losers = {}
+        
+        for playerName, participation in pairs(bet.participants) do
+            if participation.option == winningOption then
+                totalWinningBets = totalWinningBets + participation.amount
+                table.insert(winners, {name = playerName, amount = participation.amount})
+            else
+                table.insert(losers, {name = playerName, amount = participation.amount, option = participation.option})
+            end
+        end
+        
+        if totalWinningBets == 0 then
+            -- No winners - return all bets
+            payoutInfo = COLOR_ORANGE .. "No winners! Return all gold:\n\n" .. COLOR_RESET
+            
+            for _, p in ipairs(losers) do
+                local baseName = GetPlayerBaseName(p.name)
+                payoutInfo = payoutInfo .. COLOR_GREEN .. baseName .. COLOR_RESET .. "\n"
+                payoutInfo = payoutInfo .. "  Return: " .. COLOR_YELLOW .. p.amount .. "g" .. COLOR_RESET .. "\n\n"
+            end
+        else
+            -- Winners get payouts
+            table.sort(winners, function(a, b) return a.amount > b.amount end)
+            
+            payoutInfo = COLOR_GREEN .. "WINNERS - Pay Out:\n\n" .. COLOR_RESET
+            
+            for _, winner in ipairs(winners) do
+                local share = math.floor((winner.amount / totalWinningBets) * bet.totalPot)
+                local profit = share - winner.amount
+                local baseName = GetPlayerBaseName(winner.name)
+                
+                payoutInfo = payoutInfo .. COLOR_GREEN .. baseName .. COLOR_RESET .. "\n"
+                payoutInfo = payoutInfo .. "  Bet: " .. winner.amount .. "g\n"
+                payoutInfo = payoutInfo .. "  Payout: " .. COLOR_YELLOW .. share .. "g" .. COLOR_RESET
+                
+                if profit > 0 then
+                    payoutInfo = payoutInfo .. " (" .. COLOR_GREEN .. "+" .. profit .. "g profit" .. COLOR_RESET .. ")"
+                elseif profit < 0 then
+                    payoutInfo = payoutInfo .. " (" .. COLOR_RED .. profit .. "g loss" .. COLOR_RESET .. ")"
+                end
+                
+                payoutInfo = payoutInfo .. "\n\n"
+            end
+            
+            -- Show losers (no payout)
+            if #losers > 0 then
+                table.sort(losers, function(a, b) return a.amount > b.amount end)
+                payoutInfo = payoutInfo .. "\n" .. COLOR_RED .. "LOSERS - No Payout:\n\n" .. COLOR_RESET
+                
+                for _, loser in ipairs(losers) do
+                    local baseName = GetPlayerBaseName(loser.name)
+                    payoutInfo = payoutInfo .. COLOR_GRAY .. baseName .. COLOR_RESET .. " (lost " .. loser.amount .. "g on " .. loser.option .. ")\n"
+                end
+            end
+        end
+    end
+    
+    self.payoutDialog.payoutText:SetText(payoutInfo)
+    
+    -- Update scroll content height
+    local textHeight = self.payoutDialog.payoutText:GetStringHeight()
+    self.payoutDialog.scrollContent:SetHeight(math.max(textHeight + 20, 300))
+    
+    self.payoutDialog:Show()
+end
+
 -- Show bet inspect dialog
 function FuldStonks:ShowBetInspectDialog(betId)
     local bet = FuldStonksDB.activeBets[betId]
@@ -787,10 +974,21 @@ function FuldStonks:ShowBetInspectDialog(betId)
             end
         end)
         
+        -- Cancel bet button (shown only if bet creator)
+        dialog.cancelBetButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+        dialog.cancelBetButton:SetSize(100, 25)
+        dialog.cancelBetButton:SetPoint("BOTTOM", dialog, "BOTTOM", -55, 15)
+        dialog.cancelBetButton:SetText("Cancel Bet")
+        dialog.cancelBetButton:SetScript("OnClick", function()
+            if dialog.currentBetId then
+                StaticPopup_Show("FULDSTONKS_CONFIRM_CANCEL", nil, nil, dialog.currentBetId)
+            end
+        end)
+        
         -- Close button
         dialog.closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
         dialog.closeButton:SetSize(100, 25)
-        dialog.closeButton:SetPoint("BOTTOM", dialog, "BOTTOM", 0, 15)
+        dialog.closeButton:SetPoint("BOTTOM", dialog, "BOTTOM", 55, 15)
         dialog.closeButton:SetText("Close")
         dialog.closeButton:SetScript("OnClick", function()
             dialog:Hide()
@@ -814,6 +1012,7 @@ function FuldStonks:ShowBetInspectDialog(betId)
     local isCreator = (bet.createdBy == playerFullName)
     self.inspectDialog.yesWinsButton:SetShown(isCreator)
     self.inspectDialog.noWinsButton:SetShown(isCreator)
+    self.inspectDialog.cancelBetButton:SetShown(isCreator)
     
     -- Group participants by option
     local optionGroups = {}
@@ -937,6 +1136,8 @@ local function SlashCommandHandler(msg)
         print("  /FuldStonks pending - Show pending bets (bet creator only)")
         print("  /FuldStonks cancel - Cancel your pending bet")
         print("  /FuldStonks resolve - Resolve a bet you created")
+        print("  /FuldStonks showhidden - Show list of hidden bets")
+        print("  /FuldStonks unhideall - Unhide all hidden bets")
     elseif command == "version" then
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " version " .. FuldStonks.version)
     elseif command == "sync" then
@@ -983,6 +1184,10 @@ local function SlashCommandHandler(msg)
         if count == 0 then
             print("  No pending bets.")
         end
+    elseif command == "showhidden" then
+        FuldStonks:ShowHiddenBets()
+    elseif command == "unhideall" then
+        FuldStonks:UnhideAllBets()
     else
         -- Default: toggle UI
         ToggleMainFrame()
@@ -1008,6 +1213,7 @@ local MSG_SYNC_RESPONSE = "SYNCRSP" -- Response with full state
 local MSG_BET_CREATED = "BETCRT"    -- New bet created
 local MSG_BET_PLACED = "BETPLC"     -- Bet placement
 local MSG_BET_RESOLVED = "BETRSV"   -- Bet resolved
+local MSG_BET_CANCELLED = "BETCNL"  -- Bet cancelled
 local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator)
 
 -- Determine the best channel to send messages
@@ -1047,8 +1253,8 @@ end
 function FuldStonks:BroadcastMessage(msgType, ...)
     local now = GetTime()
     
-    -- Rate limit: max 1 message per second (except sync responses)
-    if msgType ~= MSG_SYNC_RESPONSE and (now - self.lastBroadcast) < 1.0 then
+    -- Rate limit: max 1 message per second (except sync responses and bet placements)
+    if msgType ~= MSG_SYNC_RESPONSE and msgType ~= MSG_BET_PLACED and (now - self.lastBroadcast) < 1.0 then
         DebugPrint("Rate limited: " .. msgType)
         return false
     end
@@ -1118,7 +1324,10 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         return
     end
     
-    DebugPrint("Received from " .. sender .. " [" .. channel .. "]: " .. message)
+    local msgType = strsplit(DELIMITER, message)
+    if msgType ~= MSG_HEARTBEAT then
+        DebugPrint("Received from " .. sender .. " [" .. channel .. "]: " .. message)
+    end
     
     local msgType, arg1, arg2, arg3 = DeserializeMessage(message)
     local now = GetTime()
@@ -1189,9 +1398,72 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
             local baseName = GetPlayerBaseName(playerName)
             DebugPrint("Received bet placement from " .. sender .. ": " .. baseName .. " bet " .. amount .. "g on " .. option)
             
+            -- Notify user about pot changes for all non-hidden bets
+            if not FuldStonksDB.ignoredBets[betId] then
+                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " bet " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET .. " | Pot now: " .. bet.totalPot .. "g")
+                print("  Bet: " .. bet.title)
+            end
+            
+            -- Clear pending bet if this is our bet being confirmed
+            if playerName == playerFullName and FuldStonks.pendingBets[playerFullName] then
+                if FuldStonks.pendingBets[playerFullName].betId == betId then
+                    FuldStonks.pendingBets[playerFullName] = nil
+                    DebugPrint("Cleared pending bet for self after confirmation")
+                end
+            end
+            
+            -- Update UI if frame exists
+            if FuldStonks.frame then
+                FuldStonks.frame:UpdateBetList()
+            end
+            
+            -- Update inspect dialog if it's showing this bet
+            if FuldStonks.inspectDialog and FuldStonks.inspectDialog:IsShown() and FuldStonks.inspectDialog.currentBetId == betId then
+                FuldStonks:ShowBetInspectDialog(betId)
+            end
+        end
+        
+    elseif msgType == MSG_BET_CANCELLED then
+        -- Handle bet cancellation from peer
+        local betId = arg1
+        
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet then
+            local creatorName = GetPlayerBaseName(sender)
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " cancelled bet: " .. bet.title)
+            
+            -- Return bets to participants
+            if next(bet.participants) then
+                print("  Returned:")
+                for playerName, participation in pairs(bet.participants) do
+                    print("    " .. GetPlayerBaseName(playerName) .. ": " .. participation.amount .. "g")
+                end
+            end
+            
+            -- Mark as cancelled and move to history
+            bet.status = "cancelled"
+            bet.cancelledAt = GetTime()
+            
+            FuldStonksDB.betHistory[betId] = bet
+            FuldStonksDB.activeBets[betId] = nil
+            
+            -- Clear any pending bets for this bet
+            for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
+                if pendingBet.betId == betId then
+                    FuldStonks.pendingBets[playerName] = nil
+                end
+            end
+            
+            DebugPrint("Received bet cancellation from " .. sender)
+            
             -- Update UI if open
             if FuldStonks.frame and FuldStonks.frame:IsShown() then
                 FuldStonks.frame:UpdateBetList()
+            end
+            
+            -- Close inspect dialog if it's showing this bet
+            if FuldStonks.inspectDialog and FuldStonks.inspectDialog:IsShown() and FuldStonks.inspectDialog.currentBetId == betId then
+                FuldStonks.inspectDialog:Hide()
             end
         end
         
@@ -1715,6 +1987,100 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
     end
 end
 
+function FuldStonks:HideBet(betId)
+    FuldStonksDB.ignoredBets[betId] = true
+    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet hidden from view. Use /fs showhidden to see hidden bets.")
+end
+
+function FuldStonks:ShowHiddenBets()
+    local count = 0
+    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Hidden bets:")
+    for betId, _ in pairs(FuldStonksDB.ignoredBets) do
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet then
+            print("  " .. bet.title)
+            count = count + 1
+        else
+            -- Clean up reference to non-existent bet
+            FuldStonksDB.ignoredBets[betId] = nil
+        end
+    end
+    if count == 0 then
+        print("  No hidden bets.")
+    else
+        print("Use /fs unhideall to unhide all bets.")
+    end
+end
+
+function FuldStonks:UnhideAllBets()
+    local count = 0
+    for _ in pairs(FuldStonksDB.ignoredBets) do
+        count = count + 1
+    end
+    FuldStonksDB.ignoredBets = {}
+    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Unhidden " .. count .. " bet(s).")
+    if self.frame and self.frame:IsShown() then
+        self.frame:UpdateBetList()
+    end
+end
+
+function FuldStonks:CancelBet(betId)
+    local bet = FuldStonksDB.activeBets[betId]
+    if not bet then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Error: Bet not found!")
+        return
+    end
+    
+    -- Only bet creator can cancel
+    if bet.createdBy ~= playerFullName then
+        print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Only the bet creator can cancel this bet!")
+        return
+    end
+    
+    print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet cancelled! Returning all bets...")
+    print("  Bet: " .. bet.title)
+    
+    -- Return bets to participants
+    if next(bet.participants) then
+        print("  Returned:")
+        for playerName, participation in pairs(bet.participants) do
+            print("    " .. GetPlayerBaseName(playerName) .. ": " .. participation.amount .. "g")
+        end
+    else
+        print("  No bets to return.")
+    end
+    
+    -- Mark as cancelled and move to history
+    bet.status = "cancelled"
+    bet.cancelledAt = GetTime()
+    
+    FuldStonksDB.betHistory[betId] = bet
+    FuldStonksDB.activeBets[betId] = nil
+    
+    -- Clear any pending bets for this bet
+    for playerName, pendingBet in pairs(self.pendingBets) do
+        if pendingBet.betId == betId then
+            self.pendingBets[playerName] = nil
+        end
+    end
+    
+    -- Broadcast cancellation
+    self:BroadcastMessage(MSG_BET_CANCELLED, betId)
+    
+    -- Update UI if open
+    if self.frame and self.frame:IsShown() then
+        self.frame:UpdateBetList()
+    end
+    
+    -- Close inspect dialog if open
+    if self.inspectDialog and self.inspectDialog:IsShown() then
+        self.inspectDialog:Hide()
+    end
+    
+    -- Show payout dialog
+    self:ShowPayoutDialog(betId, nil)
+end
+
 function FuldStonks:ResolveBet(betId, winningOption)
     local bet = FuldStonksDB.activeBets[betId]
     if not bet then
@@ -1760,10 +2126,42 @@ function FuldStonks:ResolveBet(betId, winningOption)
     -- Broadcast resolution
     self:BroadcastMessage(MSG_BET_RESOLVED, betId, winningOption)
     
+    -- Whisper all participants about their result
+    if totalWinningBets == 0 then
+        -- No winners - everyone gets refunded
+        for playerName, participation in pairs(bet.participants) do
+            if playerName ~= playerFullName then
+                local whisperMsg = string.format("FuldStonks: Bet '%s' resolved - No winners! Your %dg has been returned.", bet.title, participation.amount)
+                SendChatMessage(whisperMsg, "WHISPER", nil, playerName)
+            end
+        end
+    else
+        -- Whisper winners
+        for _, winner in ipairs(winners) do
+            if winner.name ~= playerFullName then
+                local share = math.floor((winner.amount / totalWinningBets) * bet.totalPot)
+                local profit = share - winner.amount
+                local whisperMsg = string.format("FuldStonks: You WON! Bet: '%s'. Your payout is %dg (+%dg profit)", bet.title, share, profit)
+                SendChatMessage(whisperMsg, "WHISPER", nil, winner.name)
+            end
+        end
+        
+        -- Whisper losers
+        for playerName, participation in pairs(bet.participants) do
+            if participation.option ~= winningOption and playerName ~= playerFullName then
+                local whisperMsg = string.format("FuldStonks: You lost. Bet: '%s' - %s won. You lost %dg.", bet.title, winningOption, participation.amount)
+                SendChatMessage(whisperMsg, "WHISPER", nil, playerName)
+            end
+        end
+    end
+    
     -- Update UI if open
     if self.frame and self.frame:IsShown() then
         self.frame:UpdateBetList()
     end
+    
+    -- Show payout dialog
+    self:ShowPayoutDialog(betId, winningOption)
 end
 
 -- Hook for data persistence
@@ -1777,5 +2175,6 @@ function FuldStonks:LoadData()
     FuldStonksDB.activeBets = FuldStonksDB.activeBets or {}
     FuldStonksDB.myBets = FuldStonksDB.myBets or {}
     FuldStonksDB.betHistory = FuldStonksDB.betHistory or {}
+    FuldStonksDB.ignoredBets = FuldStonksDB.ignoredBets or {}
     DebugPrint("Data loaded from SavedVariables")
 end

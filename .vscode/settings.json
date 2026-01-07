@@ -16,6 +16,8 @@
     ],
     "Lua.diagnostics.globals": [
         "SlashCmdList",
-        "LE_PARTY_CATEGORY_INSTANCE"
+        "LE_PARTY_CATEGORY_INSTANCE",
+        "StaticPopup_Show",
+        "StaticPopupDialogs"
     ]
 }
