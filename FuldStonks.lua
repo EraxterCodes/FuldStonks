@@ -10,7 +10,9 @@ FuldStonksDB = FuldStonksDB or {
     activeBets = {},      -- Active bets in the system
     myBets = {},          -- Bets I've placed
     betHistory = {},      -- Historical bets
-    ignoredBets = {}      -- Bets hidden from view
+    ignoredBets = {},     -- Bets hidden from view
+    stateVersion = 0,     -- Lamport clock for state versioning
+    syncNonce = 0         -- Nonce to track sync sessions
 }
 
 -- Constants
@@ -21,16 +23,24 @@ local COLOR_RED = "|cFFFF0000"
 local COLOR_ORANGE = "|cFFFF8800"
 local COLOR_GRAY = "|cFF808080"
 
+-- State sync constants
+local STATE_SYNC_INTERVAL = 5  -- Seconds between state broadcasts
+local STATE_CLEANUP_TIMEOUT = 30  -- Seconds before cleaning up stale state updates
+local SYNC_TYPE_HEADER = "HEADER"
+local SYNC_TYPE_BET = "BET"
+local SYNC_TYPE_PARTICIPANT = "PARTICIPANT"
+
 -- Addon state
-FuldStonks.version = "0.1.0"
+FuldStonks.version = "0.2.6"
 FuldStonks.frame = nil
-FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, betCount = 0 }
+FuldStonks.peers = {}           -- Track connected peers: [fullName] = { lastSeen = time, stateVersion = 0, nonce = 0 }
 FuldStonks.lastBroadcast = 0    -- Rate limiting for broadcasts
 FuldStonks.syncRequested = false
-FuldStonks.heartbeatTicker = nil  -- Store heartbeat ticker for cleanup
+FuldStonks.syncTicker = nil     -- Store state sync ticker for cleanup (replaces heartbeat)
 FuldStonks.rosterUpdateTimer = nil  -- Debounce timer for roster updates
 FuldStonks.betIdCounter = 0      -- Counter for generating unique bet IDs
 FuldStonks.pendingBets = {}      -- Track pending bets awaiting gold trade: {betId, option, amount}
+FuldStonks.pendingStateUpdates = {}  -- Queue for state updates to be applied
 
 -- Event frame for initialization
 local eventFrame = CreateFrame("Frame")
@@ -116,7 +126,7 @@ local function CreateMainFrame()
     
     -- Create main frame
     local frame = CreateFrame("Frame", "FuldStonksMainFrame", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(600, 450)
+    frame:SetSize(600, 480)  -- Increased height slightly for better spacing
     frame:SetPoint("CENTER")
     frame:SetMovable(true)
     frame:EnableMouse(true)
@@ -130,28 +140,59 @@ local function CreateMainFrame()
     frame.title:SetPoint("TOP", frame.TitleBg, "TOP", 0, -3)
     frame.title:SetText("FuldStonks - Guild Betting")
     
-    -- Create "Create Bet" button
-    frame.createBetButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.createBetButton:SetSize(120, 25)
-    frame.createBetButton:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -30)
-    frame.createBetButton:SetText("Create Bet")
-    frame.createBetButton:SetScript("OnClick", function()
-        FuldStonks:ShowBetCreationDialog()
+    -- Tab system
+    frame.currentTab = "active"  -- "active" or "history"
+    
+    -- Active Bets tab button
+    frame.activeTab = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.activeTab:SetSize(140, 28)
+    frame.activeTab:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -30)
+    frame.activeTab:SetText("Active Bets")
+    frame.activeTab:SetScript("OnClick", function()
+        frame.currentTab = "active"
+        frame:UpdateBetList()
+        frame.activeTab:Disable()
+        frame.historyTab:Enable()
     end)
     
-    -- Active bets title
-    frame.activeBetsTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.activeBetsTitle:SetPoint("TOPLEFT", frame.createBetButton, "BOTTOMLEFT", 0, -10)
-    frame.activeBetsTitle:SetText("Active Bets:")
+    -- History tab button
+    frame.historyTab = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.historyTab:SetSize(140, 28)
+    frame.historyTab:SetPoint("TOPLEFT", frame.activeTab, "TOPRIGHT", 5, 0)
+    frame.historyTab:SetText("History")
+    frame.historyTab:SetScript("OnClick", function()
+        frame.currentTab = "history"
+        frame:UpdateBetList()
+        frame.historyTab:Disable()
+        frame.activeTab:Enable()
+    end)
     
-    -- Scrollable bet list
+    -- Start with active tab selected
+    frame.activeTab:Disable()
+    
+    -- Tab content title
+    frame.tabTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.tabTitle:SetPoint("TOPLEFT", frame.activeTab, "BOTTOMLEFT", 5, -12)
+    frame.tabTitle:SetText("Active Bets:")
+    
+    -- Scrollable bet list (adjusted to leave room for bottom button)
     frame.betList = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    frame.betList:SetPoint("TOPLEFT", frame.activeBetsTitle, "BOTTOMLEFT", 0, -5)
-    frame.betList:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -30, 40)
+    frame.betList:SetPoint("TOPLEFT", frame.tabTitle, "BOTTOMLEFT", -5, -8)
+    frame.betList:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -30, 55)  -- More space at bottom
     
     frame.betListContent = CreateFrame("Frame", nil, frame.betList)
     frame.betListContent:SetSize(540, 1)
     frame.betList:SetScrollChild(frame.betListContent)
+    
+    -- Create "Create Bet" button at bottom (larger and centered)
+    frame.createBetButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.createBetButton:SetSize(200, 35)
+    frame.createBetButton:SetPoint("BOTTOM", frame, "BOTTOM", 0, 12)
+    frame.createBetButton:SetText("+ Create New Bet")
+    frame.createBetButton:SetNormalFontObject("GameFontNormalLarge")
+    frame.createBetButton:SetScript("OnClick", function()
+        FuldStonks:ShowBetCreationDialog()
+    end)
     
     -- Function to update bet list display
     frame.UpdateBetList = function(self)
@@ -161,32 +202,172 @@ local function CreateMainFrame()
             child:SetParent(nil)
         end
         
+        -- Update tab title
+        if self.currentTab == "active" then
+            self.tabTitle:SetText("Active Bets:")
+        else
+            self.tabTitle:SetText("Bet History:")
+        end
+        
         local yOffset = 0
         local betCount = 0
         
-        -- Display active bets
-        for betId, bet in pairs(FuldStonksDB.activeBets) do
-            if bet.status == "active" and not FuldStonksDB.ignoredBets[betId] then
-                local betFrame = CreateFrame("Frame", nil, self.betListContent, "BackdropTemplate")
-                betFrame:SetSize(520, 80)
-                betFrame:SetPoint("TOPLEFT", self.betListContent, "TOPLEFT", 0, -yOffset)
-                betFrame:SetBackdrop({
-                    bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-                    edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-                    tile = true, tileSize = 16, edgeSize = 16,
-                    insets = { left = 4, right = 4, top = 4, bottom = 4 }
-                })
+        -- Display bets based on current tab
+        local betsToShow = {}
+        if self.currentTab == "active" then
+            -- Show active bets
+            for betId, bet in pairs(FuldStonksDB.activeBets) do
+                if bet.status == "active" and not FuldStonksDB.ignoredBets[betId] then
+                    table.insert(betsToShow, {id = betId, bet = bet})
+                end
+            end
+        else
+            -- Show history (resolved and cancelled bets)
+            -- Only show bets the user participated in or created
+            for betId, bet in pairs(FuldStonksDB.betHistory) do
+                local userParticipated = false
+                
+                -- Check if user created the bet
+                if bet.createdBy == playerFullName then
+                    userParticipated = true
+                else
+                    -- Check if user was a participant
+                    for playerName, _ in pairs(bet.participants or {}) do
+                        if playerName == playerFullName then
+                            userParticipated = true
+                            break
+                        end
+                    end
+                end
+                
+                -- Only add if user participated
+                if userParticipated then
+                    table.insert(betsToShow, {id = betId, bet = bet})
+                end
+            end
+            -- Sort history by resolution time (most recent first)
+            table.sort(betsToShow, function(a, b)
+                local aTime = a.bet.resolvedAt or a.bet.cancelledAt or 0
+                local bTime = b.bet.resolvedAt or b.bet.cancelledAt or 0
+                return aTime > bTime
+            end)
+        end
+        
+        -- Create bet frames
+        for _, betData in ipairs(betsToShow) do
+            local betId = betData.id
+            local bet = betData.bet
+            local isHistory = (self.currentTab == "history")
+            
+            local betFrame = CreateFrame("Frame", nil, self.betListContent, "BackdropTemplate")
+            betFrame:SetSize(520, 80)
+            betFrame:SetPoint("TOPLEFT", self.betListContent, "TOPLEFT", 0, -yOffset)
+            betFrame:SetBackdrop({
+                bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+                edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+                tile = true, tileSize = 16, edgeSize = 16,
+                insets = { left = 4, right = 4, top = 4, bottom = 4 }
+            })
+            
+            -- Color code: darker for history, normal for active
+            if isHistory then
+                -- Determine user's outcome for this bet
+                local userParticipation = bet.participants[playerFullName]
+                local isCreator = (bet.createdBy == playerFullName)
+                
+                -- Check if user was pending when bet closed (only matters if not creator)
+                local userWasPending = not isCreator and 
+                                      FuldStonks.pendingBets[playerFullName] and 
+                                      FuldStonks.pendingBets[playerFullName].betId == betId
+                
+                if bet.status == "resolved" then
+                    if userParticipation then
+                        -- Check if user won or lost
+                        local userWon = (userParticipation.option == bet.winningOption)
+                        if userWon then
+                            -- User won (green)
+                            betFrame:SetBackdropColor(0.05, 0.20, 0.05, 0.8)  -- Bright green for won
+                            betFrame:SetBackdropBorderColor(0.2, 0.8, 0.2, 1)
+                        else
+                            -- User lost (red)
+                            betFrame:SetBackdropColor(0.20, 0.05, 0.05, 0.8)  -- Bright red for lost
+                            betFrame:SetBackdropBorderColor(0.8, 0.2, 0.2, 1)
+                        end
+                    elseif userWasPending then
+                        -- User was pending when resolved (orange)
+                        betFrame:SetBackdropColor(0.15, 0.10, 0.05, 0.8)  -- Orange tint for pending
+                        betFrame:SetBackdropBorderColor(0.8, 0.5, 0.2, 1)
+                    else
+                        -- Creator or spectator who didn't participate (neutral)
+                        betFrame:SetBackdropColor(0.08, 0.12, 0.08, 0.8)  -- Slight green tint (resolved)
+                        betFrame:SetBackdropBorderColor(0.3, 0.6, 0.3, 1)
+                    end
+                elseif bet.status == "cancelled" then
+                    if userWasPending then
+                        -- User was pending when cancelled (orange)
+                        betFrame:SetBackdropColor(0.15, 0.10, 0.05, 0.8)  -- Orange tint for pending
+                        betFrame:SetBackdropBorderColor(0.8, 0.5, 0.2, 1)
+                    else
+                        -- Cancelled (red tint) - applies to participants, creators, and spectators
+                        betFrame:SetBackdropColor(0.15, 0.05, 0.05, 0.8)
+                        betFrame:SetBackdropBorderColor(0.6, 0.2, 0.2, 1)
+                    end
+                else
+                    -- Default (shouldn't happen, but just in case)
+                    betFrame:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
+                    betFrame:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+                end
+            else
                 betFrame:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
                 betFrame:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+            end
+            
+            -- Bet title
+            local title = betFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            title:SetPoint("TOPLEFT", betFrame, "TOPLEFT", 10, -8)
+            title:SetText(bet.title)
+            title:SetJustifyH("LEFT")
+            title:SetWidth(450)
+            
+            -- Status indicator for history
+            if isHistory then
+                local statusText = betFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                statusText:SetPoint("TOPRIGHT", betFrame, "TOPRIGHT", -8, -8)
                 
-                -- Bet title
-                local title = betFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-                title:SetPoint("TOPLEFT", betFrame, "TOPLEFT", 10, -8)
-                title:SetText(bet.title)
-                title:SetJustifyH("LEFT")
-                title:SetWidth(450)
+                -- Determine user's outcome
+                local userParticipation = bet.participants[playerFullName]
+                local isCreator = (bet.createdBy == playerFullName)
+                local userWasPending = not isCreator and 
+                                      FuldStonks.pendingBets[playerFullName] and 
+                                      FuldStonks.pendingBets[playerFullName].betId == betId
                 
-                -- Hide button on the right
+                if bet.status == "resolved" then
+                    if userParticipation then
+                        local userWon = (userParticipation.option == bet.winningOption)
+                        if userWon then
+                            statusText:SetText(COLOR_GREEN .. "✓ WON" .. COLOR_RESET)
+                        else
+                            statusText:SetText(COLOR_RED .. "✗ LOST" .. COLOR_RESET)
+                        end
+                    elseif userWasPending then
+                        statusText:SetText(COLOR_ORANGE .. "⏳ PENDING" .. COLOR_RESET)
+                    else
+                        -- Creator or spectator who didn't participate
+                        statusText:SetText(COLOR_GREEN .. "✓ RESOLVED" .. COLOR_RESET)
+                    end
+                else
+                    -- Cancelled
+                    if userWasPending then
+                        statusText:SetText(COLOR_ORANGE .. "⏳ PENDING" .. COLOR_RESET)
+                    elseif userParticipation then
+                        statusText:SetText(COLOR_RED .. "✗ CANCELLED" .. COLOR_RESET)
+                    else
+                        -- Creator or spectator
+                        statusText:SetText(COLOR_RED .. "✗ CANCELLED" .. COLOR_RESET)
+                    end
+                end
+            else
+                -- Hide button on the right for active bets
                 local hideButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
                 hideButton:SetSize(50, 20)
                 hideButton:SetPoint("TOPRIGHT", betFrame, "TOPRIGHT", -8, -8)
@@ -195,14 +376,27 @@ local function CreateMainFrame()
                     FuldStonks:HideBet(betId)
                     self:UpdateBetList()
                 end)
-                
-                -- Bet info
-                local creatorName = GetPlayerBaseName(bet.createdBy)
-                local info = betFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                info:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -3)
+            end
+            
+            -- Bet info
+            local creatorName = GetPlayerBaseName(bet.createdBy)
+            local info = betFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            info:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -3)
+            
+            if isHistory then
+                -- Show final pot and winning option for history
+                if bet.status == "resolved" then
+                    info:SetText("By: " .. creatorName .. " • Winner: " .. COLOR_YELLOW .. bet.winningOption .. COLOR_RESET .. " • Final Pot: " .. bet.totalPot .. "g")
+                else
+                    info:SetText("By: " .. creatorName .. " • Cancelled • Pot: " .. bet.totalPot .. "g")
+                end
+            else
                 info:SetText("By: " .. creatorName .. " • Type: " .. bet.betType .. " • Pot: " .. bet.totalPot .. "g")
-                info:SetTextColor(0.7, 0.7, 0.7)
-                
+            end
+            info:SetTextColor(0.7, 0.7, 0.7)
+            
+            if not isHistory then
+                -- Active bet buttons
                 -- Check if player has a pending bet on this
                 local hasPending = FuldStonks.pendingBets[playerFullName] and FuldStonks.pendingBets[playerFullName].betId == betId
                 
@@ -222,6 +416,15 @@ local function CreateMainFrame()
                     cancelButton:SetScript("OnClick", function()
                         FuldStonks:CancelPendingBet()
                         self:UpdateBetList()
+                    end)
+                    
+                    -- Add Inspect button even when we have a pending bet
+                    local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                    inspectButton:SetSize(80, 22)
+                    inspectButton:SetPoint("TOPLEFT", pendingText, "BOTTOMLEFT", 85, -5)
+                    inspectButton:SetText("Inspect")
+                    inspectButton:SetScript("OnClick", function()
+                        FuldStonks:ShowBetInspectDialog(betId)
                     end)
                 else
                     -- Bet buttons for each option
@@ -246,17 +449,30 @@ local function CreateMainFrame()
                         FuldStonks:ShowBetInspectDialog(betId)
                     end)
                 end
-                
-                yOffset = yOffset + 85
-                betCount = betCount + 1
+            else
+                -- History: Only show Inspect button (greyed out style)
+                local inspectButton = CreateFrame("Button", nil, betFrame, "UIPanelButtonTemplate")
+                inspectButton:SetSize(80, 22)
+                inspectButton:SetPoint("TOPLEFT", info, "BOTTOMLEFT", 0, -5)
+                inspectButton:SetText("Inspect")
+                inspectButton:SetScript("OnClick", function()
+                    FuldStonks:ShowBetInspectDialog(betId)
+                end)
             end
+            
+            yOffset = yOffset + 85
+            betCount = betCount + 1
         end
         
         -- Show message if no bets
         if betCount == 0 then
             local noBetsText = self.betListContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             noBetsText:SetPoint("TOP", self.betListContent, "TOP", 0, -20)
-            noBetsText:SetText("No active bets.\nUse " .. COLOR_YELLOW .. "/fs create" .. COLOR_RESET .. " to create one!")
+            if self.currentTab == "active" then
+                noBetsText:SetText("No active bets.\nUse " .. COLOR_YELLOW .. "/fs create" .. COLOR_RESET .. " to create one!")
+            else
+                noBetsText:SetText("No bet history yet.\nResolved and cancelled bets will appear here.")
+            end
             noBetsText:SetJustifyH("CENTER")
         end
         
@@ -849,7 +1065,8 @@ end
 
 -- Show bet inspect dialog
 function FuldStonks:ShowBetInspectDialog(betId)
-    local bet = FuldStonksDB.activeBets[betId]
+    -- Check both active bets and history
+    local bet = FuldStonksDB.activeBets[betId] or FuldStonksDB.betHistory[betId]
     if not bet then
         print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Bet not found!")
         return
@@ -1206,15 +1423,11 @@ SlashCmdList["FULDSTONKS"] = SlashCommandHandler
 -- Addon message prefix for communication between players
 local MESSAGE_PREFIX = "FuldStonks"
 
--- Message types
-local MSG_HEARTBEAT = "HB"      -- Periodic heartbeat to announce presence
-local MSG_SYNC_REQUEST = "SYNCREQ"  -- Request full state sync
-local MSG_SYNC_RESPONSE = "SYNCRSP" -- Response with full state
-local MSG_BET_CREATED = "BETCRT"    -- New bet created
-local MSG_BET_PLACED = "BETPLC"     -- Bet placement
-local MSG_BET_RESOLVED = "BETRSV"   -- Bet resolved
-local MSG_BET_CANCELLED = "BETCNL"  -- Bet cancelled
-local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator)
+-- Message types (State-based sync model)
+local MSG_STATE_SYNC = "STATESYNC"  -- Full state broadcast (sent every 5s)
+local MSG_SYNC_REQUEST = "SYNCREQ"  -- Request full state sync on demand
+local MSG_BET_PENDING = "BETPND"    -- Pending bet notification (sent to bet creator immediately)
+local MSG_BET_PENDING_CANCEL = "BETPNDCNL"  -- Pending bet cancellation (sent to bet creator immediately)
 
 -- Determine the best channel to send messages
 local function GetBroadcastChannel()
@@ -1249,16 +1462,311 @@ local function DeserializeMessage(message)
     return msgType, unpack(parts, 2)
 end
 
--- Send addon message with rate limiting
-function FuldStonks:BroadcastMessage(msgType, ...)
-    local now = GetTime()
-    
-    -- Rate limit: max 1 message per second (except sync responses and bet placements)
-    if msgType ~= MSG_SYNC_RESPONSE and msgType ~= MSG_BET_PLACED and (now - self.lastBroadcast) < 1.0 then
-        DebugPrint("Rate limited: " .. msgType)
-        return false
+-- ============================================
+-- STATE SYNCHRONIZATION SYSTEM
+-- ============================================
+
+-- Increment Lamport clock for state versioning
+local function IncrementStateVersion()
+    FuldStonksDB.stateVersion = FuldStonksDB.stateVersion + 1
+    DebugPrint("State version incremented to: " .. FuldStonksDB.stateVersion)
+    return FuldStonksDB.stateVersion
+end
+
+-- Update Lamport clock when receiving a message
+local function UpdateStateVersion(receivedVersion)
+    local currentVersion = FuldStonksDB.stateVersion
+    FuldStonksDB.stateVersion = math.max(currentVersion, receivedVersion) + 1
+    DebugPrint("State version updated to: " .. FuldStonksDB.stateVersion .. " (received: " .. receivedVersion .. ")")
+end
+
+-- Serialize a single bet for transmission
+local function SerializeBetForSync(bet)
+    -- Format: id^title^betType^options^createdBy^timestamp^status^totalPot^stateVersion
+    local options = table.concat(bet.options, ",")
+    local parts = {
+        bet.id,
+        bet.title,
+        bet.betType,
+        options,
+        bet.createdBy,
+        tostring(bet.timestamp),
+        bet.status or "active",
+        tostring(bet.totalPot or 0),
+        tostring(bet.stateVersion or 0)
+    }
+    return table.concat(parts, "^")
+end
+
+-- Deserialize a bet from sync message
+local function DeserializeBetFromSync(betString)
+    local parts = {strsplit("^", betString)}
+    if #parts < 9 then 
+        DebugPrint("Invalid bet string, not enough parts: " .. #parts)
+        return nil 
     end
     
+    local bet = {
+        id = parts[1],
+        title = parts[2],
+        betType = parts[3],
+        options = {strsplit(",", parts[4])},
+        createdBy = parts[5],
+        timestamp = tonumber(parts[6]) or 0,
+        status = parts[7],
+        totalPot = tonumber(parts[8]) or 0,
+        stateVersion = tonumber(parts[9]) or 0,
+        participants = {},
+        pendingTrades = {}
+    }
+    return bet
+end
+
+-- Serialize a participant entry
+local function SerializeParticipant(playerName, participation)
+    -- Format: playerName~option~amount~confirmed~timestamp
+    return playerName .. "~" .. participation.option .. "~" .. tostring(participation.amount) .. "~" .. 
+           tostring(participation.confirmed or true) .. "~" .. tostring(participation.timestamp or GetTime())
+end
+
+-- Deserialize a participant entry
+local function DeserializeParticipant(participantString)
+    local parts = {strsplit("~", participantString)}
+    if #parts < 5 then return nil end
+    
+    return parts[1], {
+        option = parts[2],
+        amount = tonumber(parts[3]) or 0,
+        confirmed = (parts[4] == "true"),
+        timestamp = tonumber(parts[5]) or 0
+    }
+end
+
+-- Create a snapshot of current addon state
+function FuldStonks:CreateStateSnapshot()
+    local snapshot = {
+        version = FuldStonksDB.stateVersion or 0,
+        nonce = (FuldStonksDB.syncNonce or 0) + 1,
+        timestamp = GetTime(),
+        bets = {},
+        participants = {}  -- Separate participant data
+    }
+    
+    FuldStonksDB.syncNonce = snapshot.nonce
+    
+    -- Collect all active bets
+    for betId, bet in pairs(FuldStonksDB.activeBets) do
+        if bet.status == "active" then
+            table.insert(snapshot.bets, {
+                id = betId,
+                data = SerializeBetForSync(bet)
+            })
+            
+            -- Collect participants for this bet
+            for playerName, participation in pairs(bet.participants or {}) do
+                table.insert(snapshot.participants, {
+                    betId = betId,
+                    data = SerializeParticipant(playerName, participation)
+                })
+            end
+        end
+    end
+    
+    return snapshot
+end
+
+-- Broadcast full state sync
+function FuldStonks:BroadcastStateSync()
+    local snapshot = self:CreateStateSnapshot()
+    
+    -- Send bet data in chunks (WoW has 255 char limit per message)
+    -- Format: STATESYNC|HEADER|version|nonce|betCount|participantCount
+    local header = SerializeMessage(MSG_STATE_SYNC, SYNC_TYPE_HEADER, snapshot.version, snapshot.nonce, #snapshot.bets, #snapshot.participants)
+    
+    if #header <= 255 then
+        C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, header, GetBroadcastChannel())
+        DebugPrint("Sent state sync header: v" .. snapshot.version .. " nonce:" .. snapshot.nonce .. " bets:" .. #snapshot.bets .. " participants:" .. #snapshot.participants)
+    end
+    
+    -- Send each bet
+    for i, betData in ipairs(snapshot.bets) do
+        local betMsg = SerializeMessage(MSG_STATE_SYNC, SYNC_TYPE_BET, snapshot.nonce, i, betData.id, betData.data)
+        if #betMsg <= 255 then
+            C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, betMsg, GetBroadcastChannel())
+        else
+            DebugPrint("Bet message too long (" .. #betMsg .. " chars), skipping: " .. betData.id)
+        end
+    end
+    
+    -- Send participant data
+    for i, participantData in ipairs(snapshot.participants) do
+        local partMsg = SerializeMessage(MSG_STATE_SYNC, SYNC_TYPE_PARTICIPANT, snapshot.nonce, i, participantData.betId, participantData.data)
+        if #partMsg <= 255 then
+            C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, partMsg, GetBroadcastChannel())
+        else
+            DebugPrint("Participant message too long, skipping")
+        end
+    end
+    
+    self.lastBroadcast = GetTime()
+end
+
+-- Merge received state with local state
+function FuldStonks:MergeState(receivedBets, receivedParticipants, senderVersion, sender)
+    local changesMade = false
+    local conflicts = 0
+    
+    -- Update our Lamport clock
+    UpdateStateVersion(senderVersion)
+    
+    DebugPrint("Merging state from " .. sender .. " (v" .. senderVersion .. ")")
+    
+    -- Process each received bet
+    for betId, receivedBet in pairs(receivedBets) do
+        local localBet = FuldStonksDB.activeBets[betId]
+        local historyBet = FuldStonksDB.betHistory[betId]
+        
+        -- Check if we have this bet in history (cancelled/resolved)
+        if historyBet and (historyBet.stateVersion or 0) >= (receivedBet.stateVersion or 0) then
+            -- We have a newer or equal version in history, ignore the received bet
+            DebugPrint("  Ignoring bet from sync (in history with equal/newer version): " .. betId)
+            -- Don't add it back to active bets
+            
+        elseif not localBet then
+            -- New bet we don't have (and not in history or history is older)
+            -- Accept it with empty participants (will be filled by participant merge)
+            receivedBet.participants = {}
+            receivedBet.totalPot = 0
+            FuldStonksDB.activeBets[betId] = receivedBet
+            changesMade = true
+            DebugPrint("  Added new bet: " .. betId)
+            
+            local creatorName = GetPlayerBaseName(receivedBet.createdBy)
+            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " created bet: " .. receivedBet.title)
+            
+        elseif receivedBet.stateVersion > (localBet.stateVersion or 0) then
+            -- Received bet is newer - update it
+            -- Preserve local participants and totalPot for merging
+            local localParticipants = localBet.participants
+            local oldTotalPot = localBet.totalPot
+            
+            FuldStonksDB.activeBets[betId] = receivedBet
+            
+            -- Keep local participants and totalPot - will be merged properly in participant processing
+            receivedBet.participants = localParticipants or {}
+            receivedBet.totalPot = oldTotalPot or 0
+            
+            changesMade = true
+            DebugPrint("  Updated bet metadata: " .. betId .. " (v" .. receivedBet.stateVersion .. " > v" .. (localBet.stateVersion or 0) .. ")")
+            
+        elseif receivedBet.stateVersion == (localBet.stateVersion or 0) then
+            -- Same version - use tie-breaker (creator name lexicographically)
+            if receivedBet.createdBy < localBet.createdBy then
+                local localParticipants = localBet.participants
+                local oldTotalPot = localBet.totalPot
+                
+                FuldStonksDB.activeBets[betId] = receivedBet
+                
+                receivedBet.participants = localParticipants or {}
+                receivedBet.totalPot = oldTotalPot or 0
+                
+                conflicts = conflicts + 1
+                changesMade = true
+                DebugPrint("  Conflict resolved for bet: " .. betId .. " (chose " .. receivedBet.createdBy .. "'s version)")
+            end
+        end
+        -- else: local bet is newer, keep it
+    end
+    
+    -- Check for bets that should be removed from activeBets
+    -- If a bet's creator broadcasts without including the bet, it means they cancelled/resolved it
+    for betId, localBet in pairs(FuldStonksDB.activeBets) do
+        if localBet.createdBy == sender and not receivedBets[betId] then
+            -- The creator of this bet sent a sync without including it
+            -- This means they've cancelled or resolved it
+            DebugPrint("  Removing bet " .. betId .. " (creator " .. sender .. " no longer has it active)")
+            
+            -- Move to history as "externally cancelled" if not already there
+            if not FuldStonksDB.betHistory[betId] then
+                localBet.status = "cancelled"
+                localBet.cancelledAt = GetTime()
+                localBet.stateVersion = senderVersion
+                FuldStonksDB.betHistory[betId] = localBet
+            end
+            
+            FuldStonksDB.activeBets[betId] = nil
+            changesMade = true
+            
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet '" .. localBet.title .. "' was closed by creator")
+            DebugPrint("Moved bet to history: " .. betId .. " status=" .. localBet.status)
+        end
+    end
+    
+    -- Process participants - rebuild totalPot from scratch for each bet to avoid double-counting
+    local potsToRecalculate = {}
+    
+    for betId, participants in pairs(receivedParticipants) do
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet then
+            for playerName, participation in pairs(participants) do
+                local localParticipation = bet.participants[playerName]
+                
+                if not localParticipation then
+                    -- New participant
+                    bet.participants[playerName] = participation
+                    potsToRecalculate[betId] = true
+                    changesMade = true
+                    
+                    local baseName = GetPlayerBaseName(playerName)
+                    if not FuldStonksDB.ignoredBets[betId] then
+                        DebugPrint("  New participant: " .. baseName .. " in bet " .. betId)
+                    end
+                    
+                elseif (participation.timestamp or 0) > (localParticipation.timestamp or 0) then
+                    -- Received participant data is newer
+                    bet.participants[playerName] = participation
+                    potsToRecalculate[betId] = true
+                    changesMade = true
+                    DebugPrint("  Updated participant: " .. playerName .. " in bet " .. betId)
+                end
+            end
+        end
+    end
+    
+    -- Recalculate totalPot for bets that had participant changes
+    for betId, _ in pairs(potsToRecalculate) do
+        local bet = FuldStonksDB.activeBets[betId]
+        if bet then
+            local newTotal = 0
+            for playerName, participation in pairs(bet.participants) do
+                newTotal = newTotal + participation.amount
+            end
+            
+            if newTotal ~= bet.totalPot then
+                DebugPrint("  Recalculated pot for " .. betId .. ": " .. bet.totalPot .. "g -> " .. newTotal .. "g")
+                bet.totalPot = newTotal
+                
+                if not FuldStonksDB.ignoredBets[betId] then
+                    print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Pot updated for '" .. bet.title .. "': " .. newTotal .. "g")
+                end
+            end
+        end
+    end
+    
+    if conflicts > 0 then
+        DebugPrint("Resolved " .. conflicts .. " conflicts during merge")
+    end
+    
+    -- Update UI if changes were made
+    if changesMade and self.frame and self.frame:IsShown() then
+        self.frame:UpdateBetList()
+    end
+    
+    return changesMade
+end
+
+-- Send addon message (simplified for state-based sync)
+function FuldStonks:BroadcastMessage(msgType, ...)
     local channel = GetBroadcastChannel()
     local message = SerializeMessage(msgType, ...)
     
@@ -1269,10 +1777,7 @@ function FuldStonks:BroadcastMessage(msgType, ...)
     end
     
     C_ChatInfo.SendAddonMessage(MESSAGE_PREFIX, message, channel)
-    self.lastBroadcast = now
-    if msgType ~= MSG_HEARTBEAT then
-        DebugPrint("Sent " .. msgType .. " to " .. channel .. ": " .. message)
-    end
+    DebugPrint("Sent " .. msgType .. " to " .. channel)
     return true
 end
 
@@ -1283,34 +1788,11 @@ local function InitializeAddonComms()
     DebugPrint("Addon message prefix registered: " .. MESSAGE_PREFIX)
 end
 
--- Send heartbeat to announce presence
-function FuldStonks:SendHeartbeat()
-    local activeBetCount = 0
-    if FuldStonksDB.activeBets then
-        for _ in pairs(FuldStonksDB.activeBets) do
-            activeBetCount = activeBetCount + 1
-        end
-    end
-    self:BroadcastMessage(MSG_HEARTBEAT, self.version, activeBetCount)
-end
-
--- Request full sync from other players
+-- Request full sync from other players (on-demand)
 function FuldStonks:RequestSync()
     self:BroadcastMessage(MSG_SYNC_REQUEST)
     self.syncRequested = true
-end
-
--- Send sync response with current state
-function FuldStonks:SendSyncResponse(target)
-    -- For now, just send basic info
-    -- In future, this will include active bets
-    local activeBetCount = 0
-    if FuldStonksDB.activeBets then
-        for _ in pairs(FuldStonksDB.activeBets) do
-            activeBetCount = activeBetCount + 1
-        end
-    end
-    self:BroadcastMessage(MSG_SYNC_RESPONSE, activeBetCount)
+    DebugPrint("Sync requested from peers")
 end
 
 -- Handle received addon messages
@@ -1324,200 +1806,101 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
         return
     end
     
-    local msgType = strsplit(DELIMITER, message)
-    if msgType ~= MSG_HEARTBEAT then
-        DebugPrint("Received from " .. sender .. " [" .. channel .. "]: " .. message)
-    end
-    
-    local msgType, arg1, arg2, arg3 = DeserializeMessage(message)
+    local msgType, arg1, arg2, arg3, arg4, arg5 = DeserializeMessage(message)
     local now = GetTime()
+    
+    DebugPrint("Received " .. msgType .. " from " .. sender .. " [" .. channel .. "]")
     
     -- Update peer tracking
     if not FuldStonks.peers[sender] then
-        FuldStonks.peers[sender] = {}
-        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. sender .. " connected!")
+        FuldStonks.peers[sender] = {
+            lastSeen = now,
+            stateVersion = 0,
+            nonce = 0
+        }
+        local baseName = GetPlayerBaseName(sender)
+        print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " connected!")
     end
     FuldStonks.peers[sender].lastSeen = now
     
     -- Handle different message types
-    if msgType == MSG_HEARTBEAT then
-        local peerVersion = arg1 or "unknown"
-        local peerBetCount = tonumber(arg2) or 0
-        FuldStonks.peers[sender].version = peerVersion
-        FuldStonks.peers[sender].betCount = peerBetCount
+    if msgType == MSG_STATE_SYNC then
+        local syncType = arg1  -- SYNC_TYPE_HEADER, SYNC_TYPE_BET, or SYNC_TYPE_PARTICIPANT
+        
+        if syncType == SYNC_TYPE_HEADER then
+            -- State sync header: version, nonce, betCount, participantCount
+            local version = tonumber(arg2) or 0
+            local nonce = tonumber(arg3) or 0
+            local betCount = tonumber(arg4) or 0
+            local participantCount = tonumber(arg5) or 0
+            
+            FuldStonks.peers[sender].stateVersion = version
+            FuldStonks.peers[sender].nonce = nonce
+            
+            -- Initialize pending state update for this nonce
+            if not FuldStonks.pendingStateUpdates[sender] then
+                FuldStonks.pendingStateUpdates[sender] = {}
+            end
+            
+            FuldStonks.pendingStateUpdates[sender][nonce] = {
+                version = version,
+                expectedBets = betCount,
+                expectedParticipants = participantCount,
+                receivedBets = {},
+                receivedParticipants = {},
+                timestamp = now
+            }
+            
+            DebugPrint("State sync started from " .. sender .. ": v" .. version .. " nonce:" .. nonce .. " expecting " .. betCount .. " bets, " .. participantCount .. " participants")
+            
+        elseif syncType == SYNC_TYPE_BET then
+            -- Bet data: nonce, index, betId, serializedBet
+            local nonce = tonumber(arg2) or 0
+            local index = tonumber(arg3) or 0
+            local betId = arg4
+            local betData = arg5
+            
+            if FuldStonks.pendingStateUpdates[sender] and FuldStonks.pendingStateUpdates[sender][nonce] then
+                local bet = DeserializeBetFromSync(betData)
+                if bet then
+                    FuldStonks.pendingStateUpdates[sender][nonce].receivedBets[betId] = bet
+                    DebugPrint("  Received bet " .. index .. "/" .. FuldStonks.pendingStateUpdates[sender][nonce].expectedBets .. ": " .. betId)
+                    
+                    -- Check if we've received all expected data
+                    FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
+                end
+            end
+            
+        elseif syncType == SYNC_TYPE_PARTICIPANT then
+            -- Participant data: nonce, index, betId, serializedParticipant
+            local nonce = tonumber(arg2) or 0
+            local index = tonumber(arg3) or 0
+            local betId = arg4
+            local participantData = arg5
+            
+            if FuldStonks.pendingStateUpdates[sender] and FuldStonks.pendingStateUpdates[sender][nonce] then
+                local playerName, participation = DeserializeParticipant(participantData)
+                if playerName and participation then
+                    if not FuldStonks.pendingStateUpdates[sender][nonce].receivedParticipants[betId] then
+                        FuldStonks.pendingStateUpdates[sender][nonce].receivedParticipants[betId] = {}
+                    end
+                    FuldStonks.pendingStateUpdates[sender][nonce].receivedParticipants[betId][playerName] = participation
+                    DebugPrint("  Received participant " .. index .. "/" .. FuldStonks.pendingStateUpdates[sender][nonce].expectedParticipants .. " for bet " .. betId)
+                    
+                    -- Check if we've received all expected data
+                    FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
+                end
+            end
+        end
         
     elseif msgType == MSG_SYNC_REQUEST then
         DebugPrint(sender .. " requested sync")
-        -- Send our current state
-        FuldStonks:SendSyncResponse(sender)
-        
-    elseif msgType == MSG_SYNC_RESPONSE then
-        local betCount = tonumber(arg1) or 0
-        DebugPrint(sender .. " sync response: " .. betCount .. " bets")
-        FuldStonks.peers[sender].betCount = betCount
-        
-    elseif msgType == MSG_BET_CREATED then
-        -- Handle bet creation from peer
-        local betString = arg1
-        if betString then
-            local bet = DeserializeBet(betString)
-            if bet and not FuldStonksDB.activeBets[bet.id] then
-                FuldStonksDB.activeBets[bet.id] = bet
-                local creatorName = GetPlayerBaseName(sender)
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " created bet: " .. bet.title)
-                DebugPrint("Received " .. bet.title .. " bet from " .. sender)
-                
-                -- Update UI if open
-                if FuldStonks.frame and FuldStonks.frame:IsShown() then
-                    FuldStonks.frame:UpdateBetList()
-                end
-            end
-        end
-        
-    elseif msgType == MSG_BET_PLACED then
-        -- Handle bet placement from peer
-        local betId = arg1
-        local playerName = arg2
-        local option = arg3
-        local amount = tonumber(arg4) or 0
-        
-        local bet = FuldStonksDB.activeBets[betId]
-        if bet then
-            -- Update or add participant (handle existing bets properly)
-            local oldAmount = 0
-            if bet.participants[playerName] then
-                oldAmount = bet.participants[playerName].amount or 0
-            end
-            
-            bet.participants[playerName] = {
-                option = option,
-                amount = amount
-            }
-            bet.totalPot = bet.totalPot - oldAmount + amount
-            
-            local baseName = GetPlayerBaseName(playerName)
-            DebugPrint("Received bet placement from " .. sender .. ": " .. baseName .. " bet " .. amount .. "g on " .. option)
-            
-            -- Notify user about pot changes for all non-hidden bets
-            if not FuldStonksDB.ignoredBets[betId] then
-                print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " bet " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET .. " | Pot now: " .. bet.totalPot .. "g")
-                print("  Bet: " .. bet.title)
-            end
-            
-            -- Clear pending bet if this is our bet being confirmed
-            if playerName == playerFullName and FuldStonks.pendingBets[playerFullName] then
-                if FuldStonks.pendingBets[playerFullName].betId == betId then
-                    FuldStonks.pendingBets[playerFullName] = nil
-                    DebugPrint("Cleared pending bet for self after confirmation")
-                end
-            end
-            
-            -- Update UI if frame exists
-            if FuldStonks.frame then
-                FuldStonks.frame:UpdateBetList()
-            end
-            
-            -- Update inspect dialog if it's showing this bet
-            if FuldStonks.inspectDialog and FuldStonks.inspectDialog:IsShown() and FuldStonks.inspectDialog.currentBetId == betId then
-                FuldStonks:ShowBetInspectDialog(betId)
-            end
-        end
-        
-    elseif msgType == MSG_BET_CANCELLED then
-        -- Handle bet cancellation from peer
-        local betId = arg1
-        
-        local bet = FuldStonksDB.activeBets[betId]
-        if bet then
-            local creatorName = GetPlayerBaseName(sender)
-            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " cancelled bet: " .. bet.title)
-            
-            -- Return bets to participants
-            if next(bet.participants) then
-                print("  Returned:")
-                for playerName, participation in pairs(bet.participants) do
-                    print("    " .. GetPlayerBaseName(playerName) .. ": " .. participation.amount .. "g")
-                end
-            end
-            
-            -- Mark as cancelled and move to history
-            bet.status = "cancelled"
-            bet.cancelledAt = GetTime()
-            
-            FuldStonksDB.betHistory[betId] = bet
-            FuldStonksDB.activeBets[betId] = nil
-            
-            -- Clear any pending bets for this bet
-            for playerName, pendingBet in pairs(FuldStonks.pendingBets) do
-                if pendingBet.betId == betId then
-                    FuldStonks.pendingBets[playerName] = nil
-                end
-            end
-            
-            DebugPrint("Received bet cancellation from " .. sender)
-            
-            -- Update UI if open
-            if FuldStonks.frame and FuldStonks.frame:IsShown() then
-                FuldStonks.frame:UpdateBetList()
-            end
-            
-            -- Close inspect dialog if it's showing this bet
-            if FuldStonks.inspectDialog and FuldStonks.inspectDialog:IsShown() and FuldStonks.inspectDialog.currentBetId == betId then
-                FuldStonks.inspectDialog:Hide()
-            end
-        end
-        
-    elseif msgType == MSG_BET_RESOLVED then
-        -- Handle bet resolution from peer
-        local betId = arg1
-        local winningOption = arg2
-        
-        local bet = FuldStonksDB.activeBets[betId]
-        if bet then
-            -- Calculate winners
-            local totalWinningBets = 0
-            local winners = {}
-            
-            for playerName, participation in pairs(bet.participants) do
-                if participation.option == winningOption then
-                    totalWinningBets = totalWinningBets + participation.amount
-                    table.insert(winners, {name = playerName, amount = participation.amount})
-                end
-            end
-            
-            local creatorName = GetPlayerBaseName(sender)
-            print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " " .. creatorName .. " resolved bet: " .. bet.title)
-            print("  Winning option: " .. COLOR_YELLOW .. winningOption .. COLOR_RESET)
-            
-            if totalWinningBets == 0 then
-                print("  No winners! Bets returned.")
-            else
-                print("  Winners:")
-                for _, winner in ipairs(winners) do
-                    local share = (winner.amount / totalWinningBets) * bet.totalPot
-                    local profit = share - winner.amount
-                    print("    " .. GetPlayerBaseName(winner.name) .. ": " .. math.floor(share) .. "g (+" .. math.floor(profit) .. "g)")
-                end
-            end
-            
-            -- Mark as resolved and move to history
-            bet.status = "resolved"
-            bet.winningOption = winningOption
-            bet.resolvedAt = GetTime()
-            
-            FuldStonksDB.betHistory[betId] = bet
-            FuldStonksDB.activeBets[betId] = nil
-            
-            DebugPrint("Received bet resolution from " .. sender)
-            
-            -- Update UI if open
-            if FuldStonks.frame and FuldStonks.frame:IsShown() then
-                FuldStonks.frame:UpdateBetList()
-            end
-        end
+        -- Send our current state immediately
+        FuldStonks:BroadcastStateSync()
         
     elseif msgType == MSG_BET_PENDING then
         -- Handle pending bet notification (received by bet creator)
+        -- This still sends immediately for better UX
         local betId = arg1
         local option = arg2
         local amount = tonumber(arg3) or 0
@@ -1544,8 +1927,62 @@ local function OnAddonMessageReceived(prefix, message, channel, sender)
             DebugPrint("Bet not found or I'm not the creator, ignoring pending bet notification")
         end
         
+    elseif msgType == MSG_BET_PENDING_CANCEL then
+        -- Handle pending bet cancellation (received by bet creator)
+        local betId = arg1
+        
+        DebugPrint("Received pending bet cancellation from " .. sender .. " for bet: " .. tostring(betId))
+        
+        -- Remove the pending bet for this sender if it matches
+        if FuldStonks.pendingBets[sender] and FuldStonks.pendingBets[sender].betId == betId then
+            local baseName = GetPlayerBaseName(sender)
+            print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " " .. baseName .. " cancelled their pending bet")
+            FuldStonks.pendingBets[sender] = nil
+            DebugPrint("Removed pending bet for " .. sender)
+        end
+        
     else
         DebugPrint("Unknown message type: " .. tostring(msgType))
+    end
+end
+
+-- Check if we've received complete state update and apply it
+function FuldStonks:CheckAndApplyStateUpdate(sender, nonce)
+    local update = self.pendingStateUpdates[sender] and self.pendingStateUpdates[sender][nonce]
+    if not update then return end
+    
+    local receivedBetCount = 0
+    for _ in pairs(update.receivedBets) do
+        receivedBetCount = receivedBetCount + 1
+    end
+    
+    local receivedParticipantCount = 0
+    for _, participants in pairs(update.receivedParticipants) do
+        for _ in pairs(participants) do
+            receivedParticipantCount = receivedParticipantCount + 1
+        end
+    end
+    
+    -- Check if we have all the data
+    if receivedBetCount >= update.expectedBets and receivedParticipantCount >= update.expectedParticipants then
+        DebugPrint("Complete state received from " .. sender .. " (nonce:" .. nonce .. "), applying...")
+        
+        -- Apply the state update
+        self:MergeState(update.receivedBets, update.receivedParticipants, update.version, sender)
+        
+        -- Clean up
+        self.pendingStateUpdates[sender][nonce] = nil
+        
+        -- Clean up old pending updates (older than STATE_CLEANUP_TIMEOUT seconds)
+        local now = GetTime()
+        for peerName, nonces in pairs(self.pendingStateUpdates) do
+            for n, upd in pairs(nonces) do
+                if now - upd.timestamp > STATE_CLEANUP_TIMEOUT then
+                    DebugPrint("Cleaned up stale state update from " .. peerName .. " nonce:" .. n)
+                    self.pendingStateUpdates[peerName][n] = nil
+                end
+            end
+        end
     end
 end
 
@@ -1750,12 +2187,25 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 FuldStonksDB.debug = false
             end
             
-            -- Start heartbeat timer (every 30 seconds)
-            if FuldStonks.heartbeatTicker then
-                FuldStonks.heartbeatTicker:Cancel()
+            -- Initialize state versioning
+            if not FuldStonksDB.stateVersion then
+                FuldStonksDB.stateVersion = 0
             end
-            FuldStonks.heartbeatTicker = C_Timer.NewTicker(30, function()
-                FuldStonks:SendHeartbeat()
+            if not FuldStonksDB.syncNonce then
+                FuldStonksDB.syncNonce = 0
+            end
+            
+            -- Start state sync timer (every STATE_SYNC_INTERVAL seconds)
+            if FuldStonks.syncTicker then
+                FuldStonks.syncTicker:Cancel()
+            end
+            FuldStonks.syncTicker = C_Timer.NewTicker(STATE_SYNC_INTERVAL, function()
+                FuldStonks:BroadcastStateSync()
+            end)
+            
+            -- Send initial state sync after a short delay
+            C_Timer.After(2.0, function()
+                FuldStonks:BroadcastStateSync()
             end)
         end
     elseif event == "CHAT_MSG_ADDON" then
@@ -1766,20 +2216,20 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             FuldStonks.rosterUpdateTimer:Cancel()
         end
         FuldStonks.rosterUpdateTimer = C_Timer.NewTimer(1.5, function()
-            FuldStonks:SendHeartbeat()
+            FuldStonks:BroadcastStateSync()  -- Sync state on roster change
             FuldStonks.rosterUpdateTimer = nil
         end)
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Entering world/instance, request sync
+        -- Entering world/instance, request sync and broadcast our state
         C_Timer.After(2.0, function()
-            FuldStonks:SendHeartbeat()
+            FuldStonks:BroadcastStateSync()
             FuldStonks:RequestSync()
         end)
     elseif event == "PLAYER_LOGOUT" then
         -- Clean up timers on logout
-        if FuldStonks.heartbeatTicker then
-            FuldStonks.heartbeatTicker:Cancel()
-            FuldStonks.heartbeatTicker = nil
+        if FuldStonks.syncTicker then
+            FuldStonks.syncTicker:Cancel()
+            FuldStonks.syncTicker = nil
         end
         if FuldStonks.rosterUpdateTimer then
             FuldStonks.rosterUpdateTimer:Cancel()
@@ -1816,6 +2266,9 @@ function FuldStonks:CreateBet(betData)
     -- Generate unique bet ID
     local betId = GenerateBetId()
     
+    -- Increment state version
+    local stateVersion = IncrementStateVersion()
+    
     -- Create bet object
     local bet = {
         id = betId,
@@ -1827,18 +2280,19 @@ function FuldStonks:CreateBet(betData)
         participants = {},
         totalPot = 0,
         status = "active",
+        stateVersion = stateVersion,
         pendingTrades = {}  -- Track pending gold trades
     }
     
     -- Add to active bets
     FuldStonksDB.activeBets[betId] = bet
     
-    -- Broadcast to other players
-    local serialized = SerializeBet(bet)
-    self:BroadcastMessage(MSG_BET_CREATED, serialized)
-    
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Bet created: " .. bet.title)
-    DebugPrint("Created bet: " .. betId)
+    DebugPrint("Created bet: " .. betId .. " (v" .. stateVersion .. ")")
+    
+    -- Immediately broadcast state so spectators see the new bet right away
+    -- Don't wait for the next 5s sync cycle for better UX
+    self:BroadcastStateSync()
     
     -- Force UI update if frame exists
     if self.frame then
@@ -1942,6 +2396,10 @@ function FuldStonks:CancelPendingBet()
     if bet then
         print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Cancelled pending bet: " .. bet.title)
         print("  Choice: " .. COLOR_YELLOW .. pendingBet.option .. COLOR_RESET .. " (" .. pendingBet.amount .. "g)")
+        
+        -- Notify the bet creator that we cancelled
+        self:BroadcastMessage(MSG_BET_PENDING_CANCEL, pendingBet.betId)
+        DebugPrint("Sent pending bet cancellation for: " .. pendingBet.betId)
     end
     
     self.pendingBets[playerFullName] = nil
@@ -1956,6 +2414,9 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
         return
     end
     
+    -- Increment state version for this change
+    IncrementStateVersion()
+    
     -- Record bet placement (handle bet changes by subtracting old amount)
     local oldAmount = 0
     if bet.participants[playerName] then
@@ -1965,13 +2426,12 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
     bet.participants[playerName] = {
         option = option,
         amount = amount,
-        confirmed = true
+        confirmed = true,
+        timestamp = GetTime()  -- Add timestamp for conflict resolution
     }
     
     bet.totalPot = bet.totalPot - oldAmount + amount
-    
-    -- Broadcast to other players
-    self:BroadcastMessage(MSG_BET_PLACED, betId, playerName, option, amount)
+    bet.stateVersion = FuldStonksDB.stateVersion  -- Update bet's state version
     
     -- Whisper confirmation to the player
     local betTitle = bet.title
@@ -1979,7 +2439,9 @@ function FuldStonks:ConfirmBetTrade(playerName, betId, option, amount)
     SendChatMessage(confirmMsg, "WHISPER", nil, playerName)
     
     print(COLOR_GREEN .. "FuldStonks" .. COLOR_RESET .. " Confirmed " .. GetPlayerBaseName(playerName) .. "'s bet: " .. amount .. "g on " .. COLOR_YELLOW .. option .. COLOR_RESET)
-    DebugPrint("Confirmed bet: " .. betId .. " | " .. playerName .. " | " .. option .. " | " .. amount .. "g")
+    DebugPrint("Confirmed bet: " .. betId .. " | " .. playerName .. " | " .. option .. " | " .. amount .. "g (v" .. FuldStonksDB.stateVersion .. ")")
+    
+    -- State will be broadcast in next sync cycle
     
     -- Update UI if open
     if self.frame and self.frame:IsShown() then
@@ -2037,6 +2499,9 @@ function FuldStonks:CancelBet(betId)
         return
     end
     
+    -- Increment state version
+    IncrementStateVersion()
+    
     print(COLOR_YELLOW .. "FuldStonks" .. COLOR_RESET .. " Bet cancelled! Returning all bets...")
     print("  Bet: " .. bet.title)
     
@@ -2053,6 +2518,7 @@ function FuldStonks:CancelBet(betId)
     -- Mark as cancelled and move to history
     bet.status = "cancelled"
     bet.cancelledAt = GetTime()
+    bet.stateVersion = FuldStonksDB.stateVersion
     
     FuldStonksDB.betHistory[betId] = bet
     FuldStonksDB.activeBets[betId] = nil
@@ -2064,8 +2530,8 @@ function FuldStonks:CancelBet(betId)
         end
     end
     
-    -- Broadcast cancellation
-    self:BroadcastMessage(MSG_BET_CANCELLED, betId)
+    -- Immediately broadcast state so bet disappears for everyone
+    self:BroadcastStateSync()
     
     -- Update UI if open
     if self.frame and self.frame:IsShown() then
@@ -2087,6 +2553,9 @@ function FuldStonks:ResolveBet(betId, winningOption)
         print(COLOR_RED .. "FuldStonks" .. COLOR_RESET .. " Error: Bet not found!")
         return
     end
+    
+    -- Increment state version
+    IncrementStateVersion()
     
     -- Calculate winners and payouts
     local totalWinningBets = 0
@@ -2119,12 +2588,13 @@ function FuldStonks:ResolveBet(betId, winningOption)
     bet.status = "resolved"
     bet.winningOption = winningOption
     bet.resolvedAt = GetTime()
+    bet.stateVersion = FuldStonksDB.stateVersion
     
     FuldStonksDB.betHistory[betId] = bet
     FuldStonksDB.activeBets[betId] = nil
     
-    -- Broadcast resolution
-    self:BroadcastMessage(MSG_BET_RESOLVED, betId, winningOption)
+    -- Immediately broadcast state so bet disappears for everyone
+    self:BroadcastStateSync()
     
     -- Whisper all participants about their result
     if totalWinningBets == 0 then
